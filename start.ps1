@@ -13,6 +13,10 @@
 
 $ErrorActionPreference = "Stop"
 
+# Configuration
+$script:ImageSource = "local"  # "local" or "ghcr"
+$script:GhcrImage = "ghcr.io/mbirjax-profiler:latest"
+
 # Validate Docker
 try {
     $null = docker info 2>&1 | Out-Null
@@ -31,7 +35,19 @@ function Show-Banner {
 }
 
 function Show-Menu {
+    # Show current source
+    $sourceDisplay = if ($script:ImageSource -eq "ghcr") {
+        "GitHub Container Registry"
+    } else {
+        "Local Docker Build"
+    }
+    Write-Host "Current source: $sourceDisplay" -ForegroundColor Gray
+    Write-Host ""
+
     Write-Host "Select an option:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Image Source:" -ForegroundColor Gray
+    Write-Host "    [S] Switch source (currently: $($script:ImageSource.ToUpper()))" -ForegroundColor White
     Write-Host ""
     Write-Host "  Comprehensive Feature Profiling:" -ForegroundColor Gray
     Write-Host "    [1] Small    - 64³, 128³ volumes (5 min, all geometries)" -ForegroundColor White
@@ -57,6 +73,13 @@ function Run-Comprehensive-Profile {
     Write-Host ""
     Write-Host "Running Comprehensive Feature Profiler..." -ForegroundColor Cyan
     Write-Host "Preset: $Preset" -ForegroundColor Gray
+
+    $sourceDisplay = if ($script:ImageSource -eq "ghcr") {
+        "GitHub Container Registry"
+    } else {
+        "Local Docker Build"
+    }
+    Write-Host "Source: $sourceDisplay" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Features profiled:" -ForegroundColor Cyan
     Write-Host "  • ParallelBeamModel (2D projections)" -ForegroundColor Gray
@@ -67,16 +90,28 @@ function Run-Comprehensive-Profile {
     Write-Host ""
 
     Set-Location $PSScriptRoot
-    docker-compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py `
-        --preset $Preset
+    $outputDir = (Resolve-Path ".\output").Path
+
+    if ($script:ImageSource -eq "ghcr") {
+        # Pull from GitHub Container Registry
+        Write-Host "Pulling image from GitHub Container Registry..." -ForegroundColor Gray
+        docker run --rm `
+            -v "${outputDir}:/output" `
+            $script:GhcrImage `
+            python /scripts/comprehensive_profiler.py --preset $Preset
+    } else {
+        # Use local docker-compose build
+        docker-compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py `
+            --preset $Preset
+    }
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host ""
         Write-Host "✓ Comprehensive profiling completed!" -ForegroundColor Green
         Write-Host ""
         Write-Host "Output files:" -ForegroundColor Cyan
-        Write-Host "  • JSON data: /output/comprehensive_profile_*.json" -ForegroundColor Gray
-        Write-Host "  • Binary profiles: /output/logs/profiles/" -ForegroundColor Gray
+        Write-Host "  • JSON data: output/comprehensive_profile_*.json" -ForegroundColor Gray
+        Write-Host "  • Binary profiles: output/logs/profiles/" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Next steps:" -ForegroundColor Yellow
         Write-Host "  1. Use option [V] to view detailed profiles with snakeviz" -ForegroundColor White
@@ -158,10 +193,11 @@ function View-Profile {
     # Start snakeviz in Docker
     # Note: -H 0.0.0.0 makes snakeviz listen on all interfaces (needed for Docker port mapping)
     # Using a separate window for the container so user can see logs
+    $imageToUse = if ($script:ImageSource -eq "ghcr") { $script:GhcrImage } else { "mbirjax-profiler:latest" }
     $proc = Start-Process -FilePath "docker" -ArgumentList `
         "run", "--rm", "-p", "8080:8080", `
         "-v", "${outputDir}:/output", `
-        "mbirjax-profiler:latest", `
+        $imageToUse, `
         "snakeviz", "-s", "-H", "0.0.0.0", "-p", "8080", "/output/$($profileFile.Name)" `
         -PassThru
 
@@ -247,7 +283,18 @@ function Analyze-Profile {
     Write-Host ""
 
     Set-Location $PSScriptRoot
-    docker-compose run --rm mbirjax-profiler python /scripts/analyze_profile.py "/output/$($profileFile.Name)"
+    $outputDir = (Resolve-Path ".\output").Path
+
+    if ($script:ImageSource -eq "ghcr") {
+        # Pull from GitHub Container Registry
+        docker run --rm `
+            -v "${outputDir}:/output" `
+            $script:GhcrImage `
+            python /scripts/analyze_profile.py "/output/$($profileFile.Name)"
+    } else {
+        # Use local docker-compose build
+        docker-compose run --rm mbirjax-profiler python /scripts/analyze_profile.py "/output/$($profileFile.Name)"
+    }
 
     Write-Host ""
     Read-Host "Press Enter to continue"
@@ -281,6 +328,45 @@ function List-Profiles {
     Read-Host "Press Enter to continue"
 }
 
+function Switch-ImageSource {
+    Write-Host ""
+    Write-Host "Select image source:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  [1] Local Docker Build (docker-compose)" -ForegroundColor White
+    Write-Host "  [2] GitHub Container Registry (GHCR)" -ForegroundColor White
+    Write-Host ""
+
+    $choice = Read-Host "Enter your choice"
+
+    switch ($choice) {
+        "1" {
+            $script:ImageSource = "local"
+            Write-Host ""
+            Write-Host "✓ Switched to Local Docker Build" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "The profiler will build and run from your local Docker setup." -ForegroundColor Gray
+            Write-Host ""
+        }
+        "2" {
+            $script:ImageSource = "ghcr"
+            Write-Host ""
+            Write-Host "✓ Switched to GitHub Container Registry" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "The profiler will pull and run from: $($script:GhcrImage)" -ForegroundColor Gray
+            Write-Host ""
+            Write-Host "Note: Requires GitHub Container Registry to have pushed the image." -ForegroundColor Yellow
+            Write-Host ""
+        }
+        default {
+            Write-Host ""
+            Write-Host "✗ Invalid choice" -ForegroundColor Red
+            Write-Host ""
+        }
+    }
+
+    Read-Host "Press Enter to continue"
+}
+
 # Main loop
 Set-Location $PSScriptRoot
 
@@ -292,6 +378,9 @@ while ($true) {
     $choice = Read-Host "Enter your choice"
 
     switch ($choice.ToUpper()) {
+        "S" {
+            Switch-ImageSource
+        }
         "1" {
             Run-Comprehensive-Profile -Preset "small"
         }
