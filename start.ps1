@@ -54,9 +54,6 @@ function Show-Menu {
     Write-Host "    [2] Medium   - 64³, 128³, 256³ volumes (30 min, all geometries) - RECOMMENDED" -ForegroundColor Cyan
     Write-Host "    [3] Large    - 256³+ volumes (2+ hours, complete analysis)" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Analysis:" -ForegroundColor Gray
-    Write-Host "    [A] Analyze profile results (hotspots, function stats)" -ForegroundColor White
-    Write-Host ""
     Write-Host "  Visualization:" -ForegroundColor Gray
     Write-Host "    [V] View profile with snakeviz (select from list)" -ForegroundColor White
     Write-Host ""
@@ -110,12 +107,12 @@ function Run-Comprehensive-Profile {
         Write-Host "✓ Comprehensive profiling completed!" -ForegroundColor Green
         Write-Host ""
         Write-Host "Output files:" -ForegroundColor Cyan
-        Write-Host "  • JSON data: output/comprehensive_profile_*.json" -ForegroundColor Gray
-        Write-Host "  • Binary profiles: output/logs/profiles/" -ForegroundColor Gray
+        Write-Host "  • JSON data: output/mbirjax_profile_*.json (for AI analysis)" -ForegroundColor Gray
+        Write-Host "  • Binary profile: output/mbirjax_profile_*.prof (for snakeviz)" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Next steps:" -ForegroundColor Yellow
-        Write-Host "  1. Use option [V] to view detailed profiles with snakeviz" -ForegroundColor White
-        Write-Host "  2. Review JSON output for all feature timings" -ForegroundColor White
+        Write-Host "  1. Use option [V] to visualize with snakeviz" -ForegroundColor White
+        Write-Host "  2. Feed JSON to AI for FPGA implementation analysis" -ForegroundColor White
         Write-Host ""
         Read-Host "Press Enter to continue"
     } else {
@@ -127,41 +124,44 @@ function Run-Comprehensive-Profile {
 
 
 function View-Profile {
-    # Find all .prof files (binary cProfile output)
+    # Find all .prof files in output/
     $profileFiles = Get-ChildItem -Path "output" -Filter "*.prof" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch "_profile\.txt" } |
         Sort-Object LastWriteTime -Descending
 
     if ($profileFiles.Count -eq 0) {
         Write-Host ""
-        Write-Host "✗ No profile files found in output/ directory" -ForegroundColor Red
+        Write-Host "X No profile files found" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Run a profile first with options [1], [2], [3], or [C]" -ForegroundColor Gray
+        Write-Host "Run a profile first with options [1], [2], or [3]" -ForegroundColor Gray
         Write-Host ""
         Read-Host "Press Enter to continue"
         return
     }
 
-    # Display list of profiles for selection
+    # Display simple list
     Write-Host ""
     Write-Host "Available profiles:" -ForegroundColor Cyan
     Write-Host ""
 
     for ($i = 0; $i -lt $profileFiles.Count; $i++) {
         $prof = $profileFiles[$i]
-        $size = [math]::Round($prof.Length / 1KB, 1)
-        $date = $prof.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+        $size = [math]::Round($prof.Length / 1KB, 0)
+        $date = $prof.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
         Write-Host "  [$($i + 1)] $($prof.Name)" -ForegroundColor White
         Write-Host "      $size KB  |  $date" -ForegroundColor Gray
     }
 
     Write-Host ""
-    $selection = Read-Host "Select profile number"
+    $selection = Read-Host "Select profile number (or 'q' to cancel)"
+
+    if ($selection -eq 'q') {
+        return
+    }
 
     # Validate selection
     if (-not [int]::TryParse($selection, [ref]$null) -or [int]$selection -lt 1 -or [int]$selection -gt $profileFiles.Count) {
         Write-Host ""
-        Write-Host "✗ Invalid selection" -ForegroundColor Red
+        Write-Host "X Invalid selection" -ForegroundColor Red
         Write-Host ""
         Read-Host "Press Enter to continue"
         return
@@ -175,13 +175,9 @@ function View-Profile {
     Write-Host ""
 
     Set-Location $PSScriptRoot
-
-    # Get absolute path for volume mount (Docker on Windows needs this format)
     $outputDir = (Resolve-Path ".\output").Path
-
-    # Construct the proper snakeviz URL
-    $profilePath = "/output/$($profileFile.Name)"
-    $snakevizUrl = "http://localhost:8080/snakeviz/$($profilePath)"
+    $dockerPath = "/output/$($profileFile.Name)"
+    $snakevizUrl = "http://localhost:8080/snakeviz/$($dockerPath)"
 
     # Kill any existing containers using port 8080
     Write-Host "Cleaning up previous sessions..." -ForegroundColor Gray
@@ -190,112 +186,28 @@ function View-Profile {
 
     Write-Host "Starting snakeviz container..." -ForegroundColor Gray
 
-    # Start snakeviz in Docker
-    # Note: -H 0.0.0.0 makes snakeviz listen on all interfaces (needed for Docker port mapping)
-    # Using a separate window for the container so user can see logs
     $imageToUse = if ($script:ImageSource -eq "ghcr") { $script:GhcrImage } else { "mbirjax-profiler:latest" }
     $proc = Start-Process -FilePath "docker" -ArgumentList `
         "run", "--rm", "-p", "8080:8080", `
         "-v", "${outputDir}:/output", `
         $imageToUse, `
-        "snakeviz", "-s", "-H", "0.0.0.0", "-p", "8080", "/output/$($profileFile.Name)" `
+        "snakeviz", "-s", "-H", "0.0.0.0", "-p", "8080", $dockerPath `
         -PassThru
 
-    Write-Host "Container started. Waiting for snakeviz to bind to port 8080..." -ForegroundColor Gray
     Start-Sleep -Seconds 3
 
     Write-Host ""
     Write-Host "snakeviz is ready!" -ForegroundColor Green
-    Write-Host ""
     Write-Host "URL: $snakevizUrl" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Opening in your default browser..." -ForegroundColor Yellow
-    Write-Host ""
 
-    # Open browser to the snakeviz URL
     try {
         Start-Process $snakevizUrl
     } catch {
-        Write-Host "Could not auto-open browser. Please visit:" -ForegroundColor Yellow
-        Write-Host "  $snakevizUrl" -ForegroundColor Cyan
+        Write-Host "Open in browser: $snakevizUrl" -ForegroundColor Yellow
     }
 
-    Write-Host "snakeviz is running. Close the Docker window when you're done." -ForegroundColor Gray
-    Write-Host ""
-    Read-Host "Press Enter to continue"
-
-    Write-Host ""
-    Write-Host "Viewer stopped" -ForegroundColor Cyan
-    Write-Host ""
-
-    # Cleanup (snakeviz logs are stored in output/logs/snakeviz)
-    if (Test-Path "output/logs/snakeviz/snakeviz-output.log") {
-        Remove-Item "output/logs/snakeviz/snakeviz-output.log" -ErrorAction SilentlyContinue
-    }
-
-    Read-Host "Press Enter to continue"
-}
-
-function Analyze-Profile {
-    # Find all profile text files (cProfile output)
-    $profileFiles = Get-ChildItem -Path "output" -Filter "*_profile.txt" -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending
-
-    if ($profileFiles.Count -eq 0) {
-        Write-Host ""
-        Write-Host "✗ No profile results found in output/" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Run a profile first with options [1], [2], or [3]" -ForegroundColor Yellow
-        Write-Host ""
-        Read-Host "Press Enter to continue"
-        return
-    }
-
-    # Display list of profiles for selection
-    Write-Host ""
-    Write-Host "Available profiles:" -ForegroundColor Cyan
-    Write-Host ""
-
-    for ($i = 0; $i -lt $profileFiles.Count; $i++) {
-        $prof = $profileFiles[$i]
-        $size = [math]::Round($prof.Length / 1KB, 1)
-        $date = $prof.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
-        Write-Host "  [$($i + 1)] $($prof.Name)" -ForegroundColor White
-        Write-Host "      $size KB  |  $date" -ForegroundColor Gray
-    }
-
-    Write-Host ""
-    $selection = Read-Host "Select profile number"
-
-    # Validate selection
-    if (-not [int]::TryParse($selection, [ref]$null) -or [int]$selection -lt 1 -or [int]$selection -gt $profileFiles.Count) {
-        Write-Host ""
-        Write-Host "✗ Invalid selection" -ForegroundColor Red
-        Write-Host ""
-        Read-Host "Press Enter to continue"
-        return
-    }
-
-    $profileFile = $profileFiles[[int]$selection - 1]
-
-    Write-Host ""
-    Write-Host "Analyzing: $($profileFile.Name)" -ForegroundColor Cyan
-    Write-Host ""
-
-    Set-Location $PSScriptRoot
-    $outputDir = (Resolve-Path ".\output").Path
-
-    if ($script:ImageSource -eq "ghcr") {
-        # Pull from GitHub Container Registry
-        docker run --rm `
-            -v "${outputDir}:/output" `
-            $script:GhcrImage `
-            python /scripts/analyze_profile.py "/output/$($profileFile.Name)"
-    } else {
-        # Use local docker-compose build
-        docker-compose run --rm mbirjax-profiler python /scripts/analyze_profile.py "/output/$($profileFile.Name)"
-    }
-
+    Write-Host "Close the Docker window when done." -ForegroundColor Gray
     Write-Host ""
     Read-Host "Press Enter to continue"
 }
@@ -389,9 +301,6 @@ while ($true) {
         }
         "3" {
             Run-Comprehensive-Profile -Preset "large"
-        }
-        "A" {
-            Analyze-Profile
         }
         "V" {
             View-Profile

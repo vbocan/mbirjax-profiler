@@ -25,7 +25,7 @@ Select a profiling preset:
 - **[2] Medium** - Standard profile (30 minutes) - **RECOMMENDED**
 - **[3] Large** - Complete analysis (2+ hours)
 
-Results are saved to `output/comprehensive_profile_YYYYMMDD_HHMMSS.json`
+Results are saved to `output/mbirjax_profile_*.json`
 
 ## Running via Docker
 
@@ -47,29 +47,28 @@ docker-compose run --rm mbirjax-profiler \
 
 After profiling completes:
 
-- **JSON Data**: `output/comprehensive_profile_YYYYMMDD_HHMMSS.json` - Detailed timing for all operations
-- **Logs**: `output/logs/` - Profile logs and binary profile data
+- **JSON Data**: `output/mbirjax_profile_*.json` - Detailed timing for AI analysis
+- **Binary Profile**: `output/mbirjax_profile_*.prof` - For snakeviz visualization
 - **Console**: Summary of operation timings
 
 ## Analyzing Results
 
-```bash
-docker-compose run --rm mbirjax-profiler \
-  python /scripts/analyze_profile.py /output/comprehensive_profile_*.json
-```
+The JSON output is structured for AI analysis and includes:
+- Timings grouped by operation type and geometry
+- Scaling analysis (complexity estimates)
+- Summary with slowest operations and category totals
 
-Shows hotspots, function statistics, and candidate operations for optimization.
+Feed the JSON file to an AI assistant for FPGA implementation recommendations.
 
 ## Project Structure
 
 ```
 scripts/
-  ├── comprehensive_profiler.py    Main profiler
-  └── analyze_profile.py           Result analysis tool
+  └── comprehensive_profiler.py    Main profiler
 
 output/                            Profiling results
-  ├── logs/                        Profile logs
-  └── comprehensive_profile_*.json  Timing data
+  ├── mbirjax_profile_*.prof       Binary profile (for snakeviz)
+  └── mbirjax_profile_*.json       Timing data (for AI analysis)
 ```
 
 ## System Requirements
@@ -82,5 +81,5 @@ output/                            Profiling results
 ## Next Steps
 
 1. Run profiler: `./start.ps1` → select [2]
-2. Review JSON output in `output/`
-3. Analyze with: `analyze_profile.py /output/comprehensive_profile_*.json`
+2. Visualize with snakeviz: `./start.ps1` → select [V]
+3. Feed JSON to AI for FPGA implementation analysis
