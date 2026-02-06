@@ -1,85 +1,69 @@
 # MBIRJAX Profiler
 
-CPU profiling tool for MBIRJAX reconstruction algorithms.
-
-## Purpose
-
-This profiler measures the computational cost of MBIRJAX operations across different geometries, algorithms, and problem sizes. It profiles:
-
-- ParallelBeamModel and ConeBeamModel
-- MBIR, FBP, and FDK reconstruction algorithms
-- Forward and back-projection operations
-- Regularization computations
-- Scaling behavior across different volume sizes
-
-Output includes timing data, call counts, and performance analysis.
+Profiles all MBIRJAX operations to collect raw timing data for FPGA candidate analysis.
 
 ## Quick Start
 
-```bash
-./start.ps1
+**Windows:**
+```powershell
+.\start.ps1
 ```
 
-Select a profiling preset:
-- **[1] Small** - Quick test (5 minutes)
-- **[2] Medium** - Standard profile (30 minutes) - **RECOMMENDED**
-- **[3] Large** - Complete analysis (2+ hours)
-
-Results are saved to `output/mbirjax_profile_*.json`
-
-## Running via Docker
-
+**Linux/macOS:**
 ```bash
-# Quick profile
-docker-compose run --rm mbirjax-profiler \
-  python /scripts/comprehensive_profiler.py --preset small
-
-# Standard profile (recommended)
-docker-compose run --rm mbirjax-profiler \
-  python /scripts/comprehensive_profiler.py --preset medium
-
-# Complete profile
-docker-compose run --rm mbirjax-profiler \
-  python /scripts/comprehensive_profiler.py --preset large
+chmod +x start.sh
+./start.sh
 ```
+
+Or run directly:
+```bash
+docker-compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py
+```
+
+## What It Does
+
+Profiles every MBIRJAX operation across multiple volume sizes (32³, 64³, 128³, 256³) with 3 runs each. No configuration needed.
+
+**Operations profiled:**
+- ParallelBeamModel: forward_project, back_project, hessian_diagonal, mbir_recon, fbp_recon, fbp_filter, direct_recon
+- ConeBeamModel: forward_project, back_project, hessian_diagonal, mbir_recon, fdk_recon, fdk_filter
+- Utilities: median_filter3d, gen_pixel_partition
 
 ## Output
 
-After profiling completes:
+- **JSON**: `output/mbirjax_profile_*.json` - Raw timing measurements
+- **Prof**: `output/mbirjax_profile_*.prof` - For snakeviz visualization
 
-- **JSON Data**: `output/mbirjax_profile_*.json` - Detailed timing for AI analysis
-- **Binary Profile**: `output/mbirjax_profile_*.prof` - For snakeviz visualization
-- **Console**: Summary of operation timings
-
-## Analyzing Results
-
-The JSON output is structured for AI analysis and includes:
-- Timings grouped by operation type and geometry
-- Scaling analysis (complexity estimates)
-- Summary with slowest operations and category totals
-
-Feed the JSON file to an AI assistant for FPGA implementation recommendations.
-
-## Project Structure
-
+JSON structure:
+```json
+{
+  "measurements": [
+    {"operation": "parallel_forward_project", "volume_size": 64, "run": 1, "time": 0.234},
+    ...
+  ]
+}
 ```
-scripts/
-  └── comprehensive_profiler.py    Main profiler
 
-output/                            Profiling results
-  ├── mbirjax_profile_*.prof       Binary profile (for snakeviz)
-  └── mbirjax_profile_*.json       Timing data (for AI analysis)
+## Visualization
+
+View call tree with snakeviz:
+
+```bash
+./start.ps1  # select [V]
 ```
+
+## Why cProfile Instead of Scalene?
+
+Scalene has a better UI, but it doesn't work reliably with JAX:
+
+- **JAX compatibility**: Scalene [hangs indefinitely](https://github.com/plasma-umass/scalene/issues/106) when profiling JAX code
+- **Async execution**: JAX uses lazy execution; we need `block_until_ready()` calls with manual timing to get accurate per-operation measurements
+- **Docker issues**: Scalene has [output problems](https://github.com/plasma-umass/scalene/discussions/612) in containers
+
+cProfile + snakeviz gives us reliable operation-level timing for FPGA acceleration analysis.
 
 ## System Requirements
 
 - Docker & Docker Compose
-- 8+ GB RAM (for 512³ volumes)
+- 8+ GB RAM (for 256³ volumes)
 - Multi-core CPU
-- 10 GB disk space for output
-
-## Next Steps
-
-1. Run profiler: `./start.ps1` → select [2]
-2. Visualize with snakeviz: `./start.ps1` → select [V]
-3. Feed JSON to AI for FPGA implementation analysis

@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-MBIRJAX Comprehensive Profiler for FPGA Acceleration Analysis
+MBIRJAX Comprehensive Profiler
 
-Profiles ALL MBIRJAX operations across multiple volume sizes.
-Outputs JSON suitable for AI analysis of FPGA implementation candidates.
+Profiles all MBIRJAX operations across multiple volume sizes.
+Outputs raw timing data in JSON format for external analysis.
 
 Usage:
-  python comprehensive_profiler.py [--preset small|medium|large]
+    python comprehensive_profiler.py
 """
 
 import sys
 import time
 import json
 import cProfile
-import pstats
 from pathlib import Path
 from datetime import datetime
 
@@ -28,6 +27,10 @@ from mbirjax import ParallelBeamModel, ConeBeamModel
 import mbirjax
 
 OUTPUT_DIR = Path('/output')
+
+# Fixed volume sizes for complexity analysis
+VOLUME_SIZES = [32, 64, 128, 256]
+RUNS_PER_SIZE = 3
 
 
 def create_phantom(size: int) -> jnp.ndarray:
@@ -44,18 +47,19 @@ def create_phantom(size: int) -> jnp.ndarray:
     return jnp.array(phantom)
 
 
-def run_all_operations(vol_size: int, num_views: int, num_iters: int):
-    """Run all MBIRJAX operations for a given volume size."""
-    results = {}
+def time_operation(func, *args, **kwargs):
+    """Time a single operation, ensuring JAX synchronization."""
+    t0 = time.time()
+    result = func(*args, **kwargs)
+    if hasattr(result, 'block_until_ready'):
+        result.block_until_ready()
+    return time.time() - t0, result
 
-    print(f"\n{'='*60}")
-    print(f"Volume: {vol_size}³, Views: {num_views}, Iterations: {num_iters}")
-    print(f"{'='*60}")
 
-    phantom = create_phantom(vol_size)
+def profile_parallel_beam(phantom, vol_size, num_views):
+    """Profile all ParallelBeamModel operations."""
+    timings = {}
 
-    # ==================== PARALLEL BEAM ====================
-    print("\n[Parallel Beam Model]")
     angles = jnp.array(np.linspace(0, np.pi, num_views, endpoint=False), dtype=jnp.float32)
     model = ParallelBeamModel(
         sinogram_shape=(num_views, vol_size, vol_size),
@@ -64,274 +68,181 @@ def run_all_operations(vol_size: int, num_views: int, num_iters: int):
     model.set_params(recon_shape=(vol_size, vol_size, vol_size))
 
     # Forward projection
-    t0 = time.time()
-    sinogram = model.forward_project(phantom)
-    sinogram.block_until_ready()
-    results[f'parallel_forward_{vol_size}'] = time.time() - t0
-    print(f"  forward_project: {results[f'parallel_forward_{vol_size}']:.3f}s")
+    t, sinogram = time_operation(model.forward_project, phantom)
+    timings['parallel_forward_project'] = t
 
     # Back projection
-    t0 = time.time()
-    back = model.back_project(sinogram)
-    back.block_until_ready()
-    results[f'parallel_back_{vol_size}'] = time.time() - t0
-    print(f"  back_project: {results[f'parallel_back_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.back_project, sinogram)
+    timings['parallel_back_project'] = t
 
     # Hessian diagonal
-    t0 = time.time()
-    hess = model.compute_hessian_diagonal()
-    hess.block_until_ready()
-    results[f'parallel_hessian_{vol_size}'] = time.time() - t0
-    print(f"  compute_hessian_diagonal: {results[f'parallel_hessian_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.compute_hessian_diagonal)
+    timings['parallel_hessian_diagonal'] = t
 
     # Add noise for reconstruction
     key = jax.random.PRNGKey(42)
     sinogram_noisy = sinogram + 0.01 * jnp.max(sinogram) * jax.random.normal(key, sinogram.shape)
     sinogram_noisy.block_until_ready()
 
-    # MBIR reconstruction
-    t0 = time.time()
-    recon_result = model.recon(sinogram_noisy, max_iterations=num_iters, stop_threshold_change_pct=0, print_logs=False)
-    recon = recon_result[0] if isinstance(recon_result, tuple) else recon_result
-    recon.block_until_ready()
-    results[f'parallel_mbir_{vol_size}'] = time.time() - t0
-    print(f"  mbir_recon: {results[f'parallel_mbir_{vol_size}']:.3f}s")
+    # MBIR reconstruction (1 iteration)
+    t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+    timings['parallel_mbir_recon'] = t
 
     # FBP reconstruction
-    t0 = time.time()
-    fbp = model.fbp_recon(sinogram_noisy)
-    fbp.block_until_ready()
-    results[f'parallel_fbp_{vol_size}'] = time.time() - t0
-    print(f"  fbp_recon: {results[f'parallel_fbp_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.fbp_recon, sinogram_noisy)
+    timings['parallel_fbp_recon'] = t
 
     # FBP filter
-    t0 = time.time()
-    filtered = model.fbp_filter(sinogram_noisy)
-    filtered.block_until_ready()
-    results[f'parallel_fbp_filter_{vol_size}'] = time.time() - t0
-    print(f"  fbp_filter: {results[f'parallel_fbp_filter_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.fbp_filter, sinogram_noisy)
+    timings['parallel_fbp_filter'] = t
 
     # Direct reconstruction
-    t0 = time.time()
-    direct = model.direct_recon(sinogram_noisy)
-    direct.block_until_ready()
-    results[f'parallel_direct_{vol_size}'] = time.time() - t0
-    print(f"  direct_recon: {results[f'parallel_direct_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.direct_recon, sinogram_noisy)
+    timings['parallel_direct_recon'] = t
 
-    # ==================== CONE BEAM ====================
-    print("\n[Cone Beam Model]")
-    angles_cone = jnp.array(np.linspace(0, 2*np.pi, num_views, endpoint=False), dtype=jnp.float32)
-    cone_model = ConeBeamModel(
+    return timings
+
+
+def profile_cone_beam(phantom, vol_size, num_views):
+    """Profile all ConeBeamModel operations."""
+    timings = {}
+
+    angles = jnp.array(np.linspace(0, 2*np.pi, num_views, endpoint=False), dtype=jnp.float32)
+    model = ConeBeamModel(
         sinogram_shape=(num_views, vol_size, vol_size),
-        angles=angles_cone,
+        angles=angles,
         source_detector_dist=4.0 * vol_size,
         source_iso_dist=2.0 * vol_size,
     )
-    cone_model.set_params(recon_shape=(vol_size, vol_size, vol_size))
+    model.set_params(recon_shape=(vol_size, vol_size, vol_size))
 
     # Forward projection
-    t0 = time.time()
-    sino_cone = cone_model.forward_project(phantom)
-    sino_cone.block_until_ready()
-    results[f'cone_forward_{vol_size}'] = time.time() - t0
-    print(f"  forward_project: {results[f'cone_forward_{vol_size}']:.3f}s")
+    t, sinogram = time_operation(model.forward_project, phantom)
+    timings['cone_forward_project'] = t
 
     # Back projection
-    t0 = time.time()
-    back_cone = cone_model.back_project(sino_cone)
-    back_cone.block_until_ready()
-    results[f'cone_back_{vol_size}'] = time.time() - t0
-    print(f"  back_project: {results[f'cone_back_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.back_project, sinogram)
+    timings['cone_back_project'] = t
 
     # Hessian diagonal
-    t0 = time.time()
-    hess_cone = cone_model.compute_hessian_diagonal()
-    hess_cone.block_until_ready()
-    results[f'cone_hessian_{vol_size}'] = time.time() - t0
-    print(f"  compute_hessian_diagonal: {results[f'cone_hessian_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.compute_hessian_diagonal)
+    timings['cone_hessian_diagonal'] = t
 
-    # Add noise
-    sino_cone_noisy = sino_cone + 0.01 * jnp.max(sino_cone) * jax.random.normal(key, sino_cone.shape)
-    sino_cone_noisy.block_until_ready()
+    # Add noise for reconstruction
+    key = jax.random.PRNGKey(42)
+    sinogram_noisy = sinogram + 0.01 * jnp.max(sinogram) * jax.random.normal(key, sinogram.shape)
+    sinogram_noisy.block_until_ready()
 
-    # MBIR reconstruction
-    t0 = time.time()
-    recon_cone_result = cone_model.recon(sino_cone_noisy, max_iterations=num_iters, stop_threshold_change_pct=0, print_logs=False)
-    recon_cone = recon_cone_result[0] if isinstance(recon_cone_result, tuple) else recon_cone_result
-    recon_cone.block_until_ready()
-    results[f'cone_mbir_{vol_size}'] = time.time() - t0
-    print(f"  mbir_recon: {results[f'cone_mbir_{vol_size}']:.3f}s")
+    # MBIR reconstruction (1 iteration)
+    t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+    timings['cone_mbir_recon'] = t
 
     # FDK reconstruction
-    t0 = time.time()
-    fdk = cone_model.fdk_recon(sino_cone_noisy)
-    fdk.block_until_ready()
-    results[f'cone_fdk_{vol_size}'] = time.time() - t0
-    print(f"  fdk_recon: {results[f'cone_fdk_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.fdk_recon, sinogram_noisy)
+    timings['cone_fdk_recon'] = t
 
     # FDK filter
-    t0 = time.time()
-    fdk_filt = cone_model.fdk_filter(sino_cone_noisy)
-    fdk_filt.block_until_ready()
-    results[f'cone_fdk_filter_{vol_size}'] = time.time() - t0
-    print(f"  fdk_filter: {results[f'cone_fdk_filter_{vol_size}']:.3f}s")
+    t, _ = time_operation(model.fdk_filter, sinogram_noisy)
+    timings['cone_fdk_filter'] = t
 
-    # ==================== ADDITIONAL OPERATIONS ====================
-    print("\n[Additional Operations]")
+    return timings
+
+
+def profile_utilities(phantom, vol_size):
+    """Profile utility operations."""
+    timings = {}
+    key = jax.random.PRNGKey(42)
 
     # Median filter 3D
     try:
         from mbirjax import median_filter3d
         noisy = phantom + 0.1 * jax.random.normal(key, phantom.shape)
-        t0 = time.time()
-        med = median_filter3d(noisy)
-        med.block_until_ready()
-        results[f'median_filter3d_{vol_size}'] = time.time() - t0
-        print(f"  median_filter3d: {results[f'median_filter3d_{vol_size}']:.3f}s")
-    except Exception as e:
-        print(f"  median_filter3d: skipped ({e})")
+        noisy.block_until_ready()
+        t, _ = time_operation(median_filter3d, noisy)
+        timings['median_filter3d'] = t
+    except Exception:
+        pass
 
     # Pixel partition generation
     try:
         from mbirjax import gen_pixel_partition
         t0 = time.time()
-        partition = gen_pixel_partition((vol_size, vol_size, vol_size), 4)
-        results[f'gen_pixel_partition_{vol_size}'] = time.time() - t0
-        print(f"  gen_pixel_partition: {results[f'gen_pixel_partition_{vol_size}']:.3f}s")
-    except Exception as e:
-        print(f"  gen_pixel_partition: skipped ({e})")
+        gen_pixel_partition((vol_size, vol_size, vol_size), 4)
+        timings['gen_pixel_partition'] = time.time() - t0
+    except Exception:
+        pass
 
-    return results
+    return timings
+
+
+def run_profiling_pass(vol_size: int):
+    """Run one complete profiling pass for a given volume size."""
+    num_views = vol_size // 2
+    phantom = create_phantom(vol_size)
+
+    timings = {}
+    timings.update(profile_parallel_beam(phantom, vol_size, num_views))
+    timings.update(profile_cone_beam(phantom, vol_size, num_views))
+    timings.update(profile_utilities(phantom, vol_size))
+
+    return timings
 
 
 def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description='MBIRJAX Comprehensive Profiler')
-    parser.add_argument('--preset', choices=['small', 'medium', 'large'], default='small',
-                       help='Profile preset: small (64,128), medium (64,128,256), large (128,256,512)')
-    args = parser.parse_args()
-
-    # Define volume sizes for each preset
-    presets = {
-        'small': [(64, 36, 2), (128, 72, 2)],
-        'medium': [(64, 36, 2), (128, 72, 3), (256, 180, 3)],
-        'large': [(128, 72, 3), (256, 180, 5), (512, 360, 5)],
-    }
-
-    configs = presets[args.preset]
-
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("MBIRJAX COMPREHENSIVE PROFILER")
-    print("="*60)
-    print(f"Preset: {args.preset}")
+    print("=" * 60)
     print(f"Backend: {jax.default_backend()}")
-    print(f"Configurations: {configs}")
+    print(f"Volume sizes: {VOLUME_SIZES}")
+    print(f"Runs per size: {RUNS_PER_SIZE}")
 
-    # Start profiling
-    profiler = cProfile.Profile()
-    all_results = {
-        'preset': args.preset,
+    results = {
         'timestamp': datetime.now().isoformat(),
         'environment': {
             'backend': str(jax.default_backend()),
             'jax_version': jax.__version__,
             'mbirjax_version': getattr(mbirjax, '__version__', 'unknown'),
         },
-        'configurations': [{'volume_size': v, 'num_views': n, 'num_iters': i} for v, n, i in configs],
-        'timings': {},
-        'by_operation': {},
-        'by_geometry': {'parallel_beam': {}, 'cone_beam': {}},
-        'scaling_analysis': {},
+        'volume_sizes': VOLUME_SIZES,
+        'runs_per_size': RUNS_PER_SIZE,
+        'measurements': []
     }
 
+    # Start cProfile for snakeviz
+    profiler = cProfile.Profile()
     profiler.enable()
 
-    for vol_size, num_views, num_iters in configs:
-        results = run_all_operations(vol_size, num_views, num_iters)
-        all_results['timings'].update(results)
+    for vol_size in VOLUME_SIZES:
+        print(f"\n{'=' * 60}")
+        print(f"Volume size: {vol_size}³ (views: {vol_size // 2})")
+        print("=" * 60)
+
+        for run in range(RUNS_PER_SIZE):
+            print(f"\n  Run {run + 1}/{RUNS_PER_SIZE}")
+            timings = run_profiling_pass(vol_size)
+
+            for operation, elapsed in timings.items():
+                results['measurements'].append({
+                    'operation': operation,
+                    'volume_size': vol_size,
+                    'run': run + 1,
+                    'time': elapsed
+                })
+                print(f"    {operation}: {elapsed:.4f}s")
 
     profiler.disable()
 
-    # Save profile
+    # Save cProfile data for snakeviz
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    profile_file = OUTPUT_DIR / f"mbirjax_profile_{args.preset}_{timestamp}.prof"
+    profile_file = OUTPUT_DIR / f"mbirjax_profile_{timestamp}.prof"
     profiler.dump_stats(str(profile_file))
-    print(f"\n✓ Profile saved: {profile_file.name}")
+    print(f"\n[OK] Profile saved: {profile_file.name}")
 
-    # Organize timings by operation type and geometry
-    for key, time_val in all_results['timings'].items():
-        parts = key.rsplit('_', 1)
-        if len(parts) == 2:
-            op_name, size = parts[0], int(parts[1])
-            # By operation
-            if op_name not in all_results['by_operation']:
-                all_results['by_operation'][op_name] = {}
-            all_results['by_operation'][op_name][size] = time_val
-            # By geometry
-            if op_name.startswith('parallel_'):
-                op_short = op_name.replace('parallel_', '')
-                if op_short not in all_results['by_geometry']['parallel_beam']:
-                    all_results['by_geometry']['parallel_beam'][op_short] = {}
-                all_results['by_geometry']['parallel_beam'][op_short][size] = time_val
-            elif op_name.startswith('cone_'):
-                op_short = op_name.replace('cone_', '')
-                if op_short not in all_results['by_geometry']['cone_beam']:
-                    all_results['by_geometry']['cone_beam'][op_short] = {}
-                all_results['by_geometry']['cone_beam'][op_short][size] = time_val
-
-    # Compute scaling analysis (time increase per volume size increase)
-    sizes = sorted(set(int(k.rsplit('_', 1)[1]) for k in all_results['timings'].keys() if k.rsplit('_', 1)[1].isdigit()))
-    for op_name, size_times in all_results['by_operation'].items():
-        if len(size_times) >= 2:
-            sorted_sizes = sorted(size_times.keys())
-            scaling_factors = []
-            for i in range(1, len(sorted_sizes)):
-                s1, s2 = sorted_sizes[i-1], sorted_sizes[i]
-                t1, t2 = size_times[s1], size_times[s2]
-                if t1 > 0:
-                    volume_ratio = (s2 / s1) ** 3
-                    time_ratio = t2 / t1
-                    scaling_factors.append({
-                        'from_size': s1, 'to_size': s2,
-                        'volume_ratio': round(volume_ratio, 2),
-                        'time_ratio': round(time_ratio, 2),
-                        'complexity_estimate': round(time_ratio / volume_ratio, 3) if volume_ratio > 0 else None
-                    })
-            all_results['scaling_analysis'][op_name] = scaling_factors
-
-    # Add summary statistics
-    all_results['summary'] = {
-        'total_time': sum(all_results['timings'].values()),
-        'slowest_operations': sorted(all_results['timings'].items(), key=lambda x: x[1], reverse=True)[:10],
-        'operations_by_category': {
-            'forward_projection': sum(v for k, v in all_results['timings'].items() if 'forward' in k),
-            'back_projection': sum(v for k, v in all_results['timings'].items() if 'back' in k),
-            'reconstruction': sum(v for k, v in all_results['timings'].items() if any(x in k for x in ['mbir', 'fbp', 'fdk', 'direct'])),
-            'hessian': sum(v for k, v in all_results['timings'].items() if 'hessian' in k),
-            'filtering': sum(v for k, v in all_results['timings'].items() if 'filter' in k),
-        }
-    }
-
-    # Save JSON results
-    json_file = OUTPUT_DIR / f"mbirjax_profile_{args.preset}_{timestamp}.json"
+    # Save raw JSON results
+    json_file = OUTPUT_DIR / f"mbirjax_profile_{timestamp}.json"
     with open(json_file, 'w') as f:
-        json.dump(all_results, f, indent=2)
-    print(f"✓ Results saved: {json_file.name}")
-
-    # Print summary
-    print("\n" + "="*60)
-    print("TIMING SUMMARY (sorted by time)")
-    print("="*60)
-    sorted_timings = sorted(all_results['timings'].items(), key=lambda x: x[1], reverse=True)
-    for name, duration in sorted_timings:
-        print(f"  {name:<40} {duration:>8.3f}s")
-
-    print("\n" + "="*60)
-    print("FPGA CANDIDATES (top consumers)")
-    print("="*60)
-    for name, duration in sorted_timings[:10]:
-        print(f"  • {name}: {duration:.3f}s")
+        json.dump(results, f, indent=2)
+    print(f"[OK] Results saved: {json_file.name}")
 
 
 if __name__ == '__main__':
