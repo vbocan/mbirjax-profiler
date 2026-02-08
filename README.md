@@ -1,6 +1,17 @@
 # MBIRJAX Profiler
 
-Profiles all MBIRJAX operations to collect raw timing data for FPGA candidate analysis.
+GPU-accelerated profiling of all MBIRJAX operations using Scalene for line-level CPU/GPU/memory analysis, targeting FPGA candidate identification.
+
+## Prerequisites
+
+- **Docker Desktop** with Docker Compose V2 (`docker compose`, not `docker-compose`)
+- **NVIDIA GPU** with driver 565.90+ (RTX 5080 or compatible)
+- **NVIDIA Container Toolkit** (included with Docker Desktop on Windows/WSL2)
+
+Verify GPU access in Docker:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.8.0-runtime-ubuntu22.04 nvidia-smi
+```
 
 ## Quick Start
 
@@ -17,12 +28,12 @@ chmod +x start.sh
 
 Or run directly:
 ```bash
-docker-compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py
+docker compose run --rm mbirjax-profiler python -m scalene run --gpu -o /output/scalene_profile.json /scripts/comprehensive_profiler.py
 ```
 
 ## What It Does
 
-Profiles every MBIRJAX operation across multiple volume sizes (32³, 64³, 128³, 256³) with 3 runs each. No configuration needed.
+Profiles every MBIRJAX operation across multiple volume sizes (32^3, 64^3, 128^3, 256^3) with 3 runs each. Scalene wraps the profiling script externally, providing line-level CPU/GPU/memory breakdown with no code changes needed.
 
 **Operations profiled:**
 - ParallelBeamModel: forward_project, back_project, hessian_diagonal, mbir_recon, fbp_recon, fbp_filter, direct_recon
@@ -31,39 +42,51 @@ Profiles every MBIRJAX operation across multiple volume sizes (32³, 64³, 128³
 
 ## Output
 
-- **JSON**: `output/mbirjax_profile_*.json` - Raw timing measurements
-- **Prof**: `output/mbirjax_profile_*.prof` - For snakeviz visualization
+Each profiling run produces three files in `output/`:
 
-JSON structure:
+| File | Source | Purpose |
+|------|--------|---------|
+| `scalene_profile_*.html` | Scalene | Interactive CPU/GPU/memory line-level profile (open in browser) |
+| `scalene_profile_*.json` | Scalene | Machine-readable Scalene data |
+| `mbirjax_profile_*.json` | Script | Per-operation timing with `block_until_ready()` synchronization |
+
+Timing JSON structure:
 ```json
 {
+  "environment": {
+    "backend": "gpu",
+    "devices": ["cuda:0"],
+    "jax_version": "...",
+    "mbirjax_version": "..."
+  },
   "measurements": [
-    {"operation": "parallel_forward_project", "volume_size": 64, "run": 1, "time": 0.234},
-    ...
+    {"operation": "parallel_forward_project", "volume_size": 64, "run": 1, "time": 0.234}
   ]
 }
 ```
 
-## Visualization
+## Why Scalene
 
-View call tree with snakeviz:
+- **GPU profiling**: Tracks time spent on GPU vs CPU per line of code
+- **Line-level granularity**: Identifies exact lines consuming GPU/CPU/memory resources
+- **Memory tracking**: Shows allocation patterns useful for FPGA memory planning
+- **Self-contained HTML**: No server needed (unlike snakeviz) — just open in a browser
+- **JAX compatible**: v2.1.3+ fixes the JAX hanging issue (plasma-umass/scalene#106)
 
+## Verification
+
+After building, verify the setup:
 ```bash
-./start.ps1  # select [V]
+# GPU visible in container
+docker compose run --rm mbirjax-profiler nvidia-smi
+
+# JAX sees CUDA
+docker compose run --rm mbirjax-profiler python -c "import jax; print(jax.devices())"
 ```
-
-## Why cProfile Instead of Scalene?
-
-Scalene has a better UI, but it doesn't work reliably with JAX:
-
-- **JAX compatibility**: Scalene [hangs indefinitely](https://github.com/plasma-umass/scalene/issues/106) when profiling JAX code
-- **Async execution**: JAX uses lazy execution; we need `block_until_ready()` calls with manual timing to get accurate per-operation measurements
-- **Docker issues**: Scalene has [output problems](https://github.com/plasma-umass/scalene/discussions/612) in containers
-
-cProfile + snakeviz gives us reliable operation-level timing for FPGA acceleration analysis.
 
 ## System Requirements
 
-- Docker & Docker Compose
-- 8+ GB RAM (for 256³ volumes)
-- Multi-core CPU
+- NVIDIA GPU (RTX 5080 or compatible)
+- CUDA 12.8+ / Driver 565.90+
+- Docker Desktop with Compose V2
+- 16+ GB RAM (for 256^3 volumes on GPU)

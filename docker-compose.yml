@@ -1,5 +1,5 @@
 # MBIRJAX Profiler for FPGA Optimization Analysis
-# CPU-only profiling with cProfile for performance analysis
+# GPU profiling with Scalene — requires Docker Compose V2
 
 services:
   mbirjax-profiler:
@@ -9,15 +9,24 @@ services:
     image: mbirjax-profiler:latest
     container_name: mbirjax-profiler
 
-    shm_size: '4gb'
+    shm_size: '16gb'
 
     environment:
-      # JAX XLA configuration for CPU-only profiling
-      - JAX_PLATFORMS=cpu
+      # JAX XLA configuration for GPU profiling
+      - JAX_PLATFORMS=cuda,cpu
       - XLA_PYTHON_CLIENT_PREALLOCATE=true
-      - XLA_PYTHON_CLIENT_MEM_FRACTION=0.7
+      - XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
+      - TF_CPP_MIN_LOG_LEVEL=2
       # Output directory for profiling results
       - OUTPUT_DIR=/output
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
     ulimits:
       memlock:
@@ -31,4 +40,3 @@ services:
     stdin_open: true
     tty: true
     working_dir: /output
-

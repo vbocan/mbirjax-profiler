@@ -12,7 +12,6 @@ Usage:
 import sys
 import time
 import json
-import cProfile
 from pathlib import Path
 from datetime import datetime
 
@@ -200,6 +199,7 @@ def main():
         'timestamp': datetime.now().isoformat(),
         'environment': {
             'backend': str(jax.default_backend()),
+            'devices': [str(d) for d in jax.devices()],
             'jax_version': jax.__version__,
             'mbirjax_version': getattr(mbirjax, '__version__', 'unknown'),
         },
@@ -207,10 +207,6 @@ def main():
         'runs_per_size': RUNS_PER_SIZE,
         'measurements': []
     }
-
-    # Start cProfile for snakeviz
-    profiler = cProfile.Profile()
-    profiler.enable()
 
     for vol_size in VOLUME_SIZES:
         print(f"\n{'=' * 60}")
@@ -230,15 +226,8 @@ def main():
                 })
                 print(f"    {operation}: {elapsed:.4f}s")
 
-    profiler.disable()
-
-    # Save cProfile data for snakeviz
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    profile_file = OUTPUT_DIR / f"mbirjax_profile_{timestamp}.prof"
-    profiler.dump_stats(str(profile_file))
-    print(f"\n[OK] Profile saved: {profile_file.name}")
-
     # Save raw JSON results
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     json_file = OUTPUT_DIR / f"mbirjax_profile_{timestamp}.json"
     with open(json_file, 'w') as f:
         json.dump(results, f, indent=2)
