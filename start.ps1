@@ -46,7 +46,7 @@ function Run-Profile {
     $htmlFile = "scalene_profile_$timestamp.html"
 
     # Run Scalene profiler (produces JSON)
-    docker compose run --rm mbirjax-profiler python -m scalene run --gpu -o "/output/$jsonFile" /scripts/comprehensive_profiler.py
+    docker compose run --rm mbirjax-profiler python -m scalene run --cpu-only --profile-all --profile-only mbirjax -o "/output/$jsonFile" /scripts/comprehensive_profiler.py
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host ""

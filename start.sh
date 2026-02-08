@@ -35,7 +35,7 @@ run_profile() {
     html_file="scalene_profile_${timestamp}.html"
 
     # Run Scalene profiler (produces JSON)
-    docker compose run --rm mbirjax-profiler python -m scalene run --gpu -o "/output/${json_file}" /scripts/comprehensive_profiler.py
+    docker compose run --rm mbirjax-profiler python -m scalene run --cpu-only --profile-all --profile-only mbirjax -o "/output/${json_file}" /scripts/comprehensive_profiler.py
 
     if [ $? -ne 0 ]; then
         echo ""

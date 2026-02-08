@@ -28,7 +28,7 @@ chmod +x start.sh
 
 Or run directly:
 ```bash
-docker compose run --rm mbirjax-profiler python -m scalene run --gpu -o /output/scalene_profile.json /scripts/comprehensive_profiler.py
+docker compose run --rm mbirjax-profiler python -m scalene run --cpu-only --profile-all --profile-only mbirjax -o /output/scalene_profile.json /scripts/comprehensive_profiler.py
 ```
 
 ## What It Does

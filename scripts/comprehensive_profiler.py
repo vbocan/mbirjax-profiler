@@ -23,6 +23,7 @@ import jax.numpy as jnp
 sys.modules['easygui'] = type(sys)('easygui')
 
 from mbirjax import ParallelBeamModel, ConeBeamModel
+from mbirjax import gen_pixel_partition
 import mbirjax
 
 OUTPUT_DIR = Path('/output')
@@ -52,6 +53,8 @@ def time_operation(func, *args, **kwargs):
     result = func(*args, **kwargs)
     if hasattr(result, 'block_until_ready'):
         result.block_until_ready()
+    elif isinstance(result, tuple) and len(result) > 0 and hasattr(result[0], 'block_until_ready'):
+        result[0].block_until_ready()
     return time.time() - t0, result
 
 
@@ -65,6 +68,7 @@ def profile_parallel_beam(phantom, vol_size, num_views):
         angles=angles,
     )
     model.set_params(recon_shape=(vol_size, vol_size, vol_size))
+    partitions = gen_pixel_partition((vol_size, vol_size, vol_size), 4)
 
     # Forward projection
     t, sinogram = time_operation(model.forward_project, phantom)
@@ -74,9 +78,33 @@ def profile_parallel_beam(phantom, vol_size, num_views):
     t, _ = time_operation(model.back_project, sinogram)
     timings['parallel_back_project'] = t
 
+    # Sparse forward projection
+    try:
+        pixel_indices = partitions[0]
+        voxel_values = phantom.reshape(vol_size * vol_size, vol_size)[pixel_indices]
+        t, _ = time_operation(model.sparse_forward_project, voxel_values, pixel_indices)
+        timings['parallel_sparse_forward_project'] = t
+    except Exception:
+        pass
+
+    # Sparse back projection
+    try:
+        pixel_indices = partitions[0]
+        t, _ = time_operation(model.sparse_back_project, sinogram, pixel_indices)
+        timings['parallel_sparse_back_project'] = t
+    except Exception:
+        pass
+
     # Hessian diagonal
     t, _ = time_operation(model.compute_hessian_diagonal)
     timings['parallel_hessian_diagonal'] = t
+
+    # Direct filter
+    try:
+        t, _ = time_operation(model.direct_filter, sinogram)
+        timings['parallel_direct_filter'] = t
+    except Exception:
+        pass
 
     # Add noise for reconstruction
     key = jax.random.PRNGKey(42)
@@ -86,6 +114,13 @@ def profile_parallel_beam(phantom, vol_size, num_views):
     # MBIR reconstruction (1 iteration)
     t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
     timings['parallel_mbir_recon'] = t
+
+    # Proximal map (1 iteration, exercises VCD + QGGMRF internally)
+    try:
+        t, _ = time_operation(model.prox_map, phantom, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+        timings['parallel_prox_map'] = t
+    except Exception:
+        pass
 
     # FBP reconstruction
     t, _ = time_operation(model.fbp_recon, sinogram_noisy)
@@ -98,6 +133,19 @@ def profile_parallel_beam(phantom, vol_size, num_views):
     # Direct reconstruction
     t, _ = time_operation(model.direct_recon, sinogram_noisy)
     timings['parallel_direct_recon'] = t
+
+    # Weight generation
+    try:
+        t, _ = time_operation(mbirjax.gen_weights, sinogram, 'transmission')
+        timings['gen_weights_transmission'] = t
+    except Exception:
+        pass
+
+    try:
+        t, _ = time_operation(mbirjax.gen_weights_mar, model, sinogram)
+        timings['parallel_gen_weights_mar'] = t
+    except Exception:
+        pass
 
     return timings
 
@@ -114,6 +162,7 @@ def profile_cone_beam(phantom, vol_size, num_views):
         source_iso_dist=2.0 * vol_size,
     )
     model.set_params(recon_shape=(vol_size, vol_size, vol_size))
+    partitions = gen_pixel_partition((vol_size, vol_size, vol_size), 4)
 
     # Forward projection
     t, sinogram = time_operation(model.forward_project, phantom)
@@ -123,9 +172,33 @@ def profile_cone_beam(phantom, vol_size, num_views):
     t, _ = time_operation(model.back_project, sinogram)
     timings['cone_back_project'] = t
 
+    # Sparse forward projection
+    try:
+        pixel_indices = partitions[0]
+        voxel_values = phantom.reshape(vol_size * vol_size, vol_size)[pixel_indices]
+        t, _ = time_operation(model.sparse_forward_project, voxel_values, pixel_indices)
+        timings['cone_sparse_forward_project'] = t
+    except Exception:
+        pass
+
+    # Sparse back projection
+    try:
+        pixel_indices = partitions[0]
+        t, _ = time_operation(model.sparse_back_project, sinogram, pixel_indices)
+        timings['cone_sparse_back_project'] = t
+    except Exception:
+        pass
+
     # Hessian diagonal
     t, _ = time_operation(model.compute_hessian_diagonal)
     timings['cone_hessian_diagonal'] = t
+
+    # Direct filter
+    try:
+        t, _ = time_operation(model.direct_filter, sinogram)
+        timings['cone_direct_filter'] = t
+    except Exception:
+        pass
 
     # Add noise for reconstruction
     key = jax.random.PRNGKey(42)
@@ -136,6 +209,13 @@ def profile_cone_beam(phantom, vol_size, num_views):
     t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
     timings['cone_mbir_recon'] = t
 
+    # Proximal map (1 iteration, exercises VCD + QGGMRF internally)
+    try:
+        t, _ = time_operation(model.prox_map, phantom, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+        timings['cone_prox_map'] = t
+    except Exception:
+        pass
+
     # FDK reconstruction
     t, _ = time_operation(model.fdk_recon, sinogram_noisy)
     timings['cone_fdk_recon'] = t
@@ -144,6 +224,38 @@ def profile_cone_beam(phantom, vol_size, num_views):
     t, _ = time_operation(model.fdk_filter, sinogram_noisy)
     timings['cone_fdk_filter'] = t
 
+    # Direct reconstruction
+    try:
+        t, _ = time_operation(model.direct_recon, sinogram_noisy)
+        timings['cone_direct_recon'] = t
+    except Exception:
+        pass
+
+    # Weight generation (MAR)
+    try:
+        t, _ = time_operation(mbirjax.gen_weights_mar, model, sinogram)
+        timings['cone_gen_weights_mar'] = t
+    except Exception:
+        pass
+
+    return timings
+
+
+def profile_denoiser(phantom, vol_size):
+    """Profile QGGMRFDenoiser (exercises QGGMRF regularization kernels)."""
+    timings = {}
+    key = jax.random.PRNGKey(42)
+    noisy = phantom + 0.05 * jnp.max(phantom) * jax.random.normal(key, phantom.shape)
+    noisy.block_until_ready()
+
+    try:
+        from mbirjax import QGGMRFDenoiser
+        denoiser = QGGMRFDenoiser(noisy.shape)
+        t, _ = time_operation(denoiser.denoise, noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+        timings['qggmrf_denoise'] = t
+    except Exception:
+        pass
+
     return timings
 
 
@@ -151,6 +263,7 @@ def profile_utilities(phantom, vol_size):
     """Profile utility operations."""
     timings = {}
     key = jax.random.PRNGKey(42)
+    recon_shape = (vol_size, vol_size, vol_size)
 
     # Median filter 3D
     try:
@@ -162,12 +275,24 @@ def profile_utilities(phantom, vol_size):
     except Exception:
         pass
 
-    # Pixel partition generation
+    # Pixel partition generation variants
+    t0 = time.time()
+    gen_pixel_partition(recon_shape, 4)
+    timings['gen_pixel_partition'] = time.time() - t0
+
     try:
-        from mbirjax import gen_pixel_partition
+        from mbirjax import gen_pixel_partition_blue_noise
         t0 = time.time()
-        gen_pixel_partition((vol_size, vol_size, vol_size), 4)
-        timings['gen_pixel_partition'] = time.time() - t0
+        gen_pixel_partition_blue_noise(recon_shape, 4)
+        timings['gen_pixel_partition_blue_noise'] = time.time() - t0
+    except Exception:
+        pass
+
+    try:
+        from mbirjax import gen_pixel_partition_grid
+        t0 = time.time()
+        gen_pixel_partition_grid(recon_shape, 4)
+        timings['gen_pixel_partition_grid'] = time.time() - t0
     except Exception:
         pass
 
@@ -182,6 +307,7 @@ def run_profiling_pass(vol_size: int):
     timings = {}
     timings.update(profile_parallel_beam(phantom, vol_size, num_views))
     timings.update(profile_cone_beam(phantom, vol_size, num_views))
+    timings.update(profile_denoiser(phantom, vol_size))
     timings.update(profile_utilities(phantom, vol_size))
 
     return timings
@@ -210,7 +336,7 @@ def main():
 
     for vol_size in VOLUME_SIZES:
         print(f"\n{'=' * 60}")
-        print(f"Volume size: {vol_size}³ (views: {vol_size // 2})")
+        print(f"Volume size: {vol_size}\u00b3 (views: {vol_size // 2})")
         print("=" * 60)
 
         for run in range(RUNS_PER_SIZE):
