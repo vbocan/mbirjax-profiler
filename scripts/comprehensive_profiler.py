@@ -353,11 +353,9 @@ def profile_utilities(phantom, vol_size):
     return timings
 
 
-def run_profiling_pass(vol_size, trace_dir=None):
+def run_profiling_pass(vol_size):
     """Run one complete profiling pass for a given volume size.
 
-    If trace_dir is provided, the entire pass is wrapped in
-    jax.profiler.trace() to capture an XLA execution timeline.
     Each operation is annotated with StepTraceAnnotation so XProf
     can attribute GPU kernels to individual operations.
     """
@@ -365,14 +363,11 @@ def run_profiling_pass(vol_size, trace_dir=None):
     num_views = vol_size // 2
     phantom = create_phantom(vol_size)
 
-    ctx = jax.profiler.trace(str(trace_dir)) if trace_dir else contextlib.nullcontext()
-
-    with ctx:
-        timings = {}
-        timings.update(profile_parallel_beam(phantom, vol_size, num_views))
-        timings.update(profile_cone_beam(phantom, vol_size, num_views))
-        timings.update(profile_denoiser(phantom, vol_size))
-        timings.update(profile_utilities(phantom, vol_size))
+    timings = {}
+    timings.update(profile_parallel_beam(phantom, vol_size, num_views))
+    timings.update(profile_cone_beam(phantom, vol_size, num_views))
+    timings.update(profile_denoiser(phantom, vol_size))
+    timings.update(profile_utilities(phantom, vol_size))
 
     return timings
 
@@ -523,7 +518,7 @@ def main():
     print(f"Devices:      {jax.devices()}")
     print(f"JAX version:  {jax.__version__}")
     print(f"Volume sizes: {VOLUME_SIZES}")
-    print(f"Runs/size:    {RUNS_PER_SIZE} (run 1 is JIT warmup, run 2 is traced, run 3 is timing)")
+    print(f"Runs/size:    {RUNS_PER_SIZE} (run 1 warmup, run 2 traced, run 3 timing)")
 
     results = {
         'timestamp': datetime.now().isoformat(),
@@ -545,7 +540,7 @@ def main():
         print("=" * 60)
 
         for run in range(RUNS_PER_SIZE):
-            # Capture XLA trace on the second run (after JIT warmup)
+            # Capture XLA trace on Run 2 (after JIT warmup)
             if run == TRACE_RUN:
                 trace_dir = trace_base / f'vol{vol_size}'
                 trace_dir.mkdir(parents=True, exist_ok=True)
@@ -556,7 +551,9 @@ def main():
                 suffix = f" [{label}]" if label else ""
                 print(f"\n  Run {run + 1}/{RUNS_PER_SIZE}{suffix}")
 
-            timings = run_profiling_pass(vol_size, trace_dir=trace_dir)
+            ctx = jax.profiler.trace(str(trace_dir)) if trace_dir else contextlib.nullcontext()
+            with ctx:
+                timings = run_profiling_pass(vol_size)
 
             for operation, elapsed in timings.items():
                 results['measurements'].append({
