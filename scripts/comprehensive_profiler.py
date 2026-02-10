@@ -63,6 +63,9 @@ def create_phantom(size: int) -> jnp.ndarray:
     return jnp.array(phantom)
 
 
+_step_num = [0]
+
+
 def time_operation(func, *args, **kwargs):
     """Time a single operation, ensuring JAX synchronization."""
     t0 = time.time()
@@ -72,6 +75,14 @@ def time_operation(func, *args, **kwargs):
     elif isinstance(result, tuple) and len(result) > 0 and hasattr(result[0], 'block_until_ready'):
         result[0].block_until_ready()
     return time.time() - t0, result
+
+
+@contextlib.contextmanager
+def step(name):
+    """Wrap an operation in a StepTraceAnnotation for XProf step analysis."""
+    with jax.profiler.StepTraceAnnotation(name, step_num=_step_num[0]):
+        _step_num[0] += 1
+        yield
 
 
 def profile_parallel_beam(phantom, vol_size, num_views):
@@ -87,18 +98,21 @@ def profile_parallel_beam(phantom, vol_size, num_views):
     partitions = gen_pixel_partition((vol_size, vol_size, vol_size), 4)
 
     # Forward projection
-    t, sinogram = time_operation(model.forward_project, phantom)
+    with step('parallel_forward_project'):
+        t, sinogram = time_operation(model.forward_project, phantom)
     timings['parallel_forward_project'] = t
 
     # Back projection
-    t, _ = time_operation(model.back_project, sinogram)
+    with step('parallel_back_project'):
+        t, _ = time_operation(model.back_project, sinogram)
     timings['parallel_back_project'] = t
 
     # Sparse forward projection
     try:
         pixel_indices = partitions[0]
         voxel_values = phantom.reshape(vol_size * vol_size, vol_size)[pixel_indices]
-        t, _ = time_operation(model.sparse_forward_project, voxel_values, pixel_indices)
+        with step('parallel_sparse_forward_project'):
+            t, _ = time_operation(model.sparse_forward_project, voxel_values, pixel_indices)
         timings['parallel_sparse_forward_project'] = t
     except Exception:
         pass
@@ -106,18 +120,21 @@ def profile_parallel_beam(phantom, vol_size, num_views):
     # Sparse back projection
     try:
         pixel_indices = partitions[0]
-        t, _ = time_operation(model.sparse_back_project, sinogram, pixel_indices)
+        with step('parallel_sparse_back_project'):
+            t, _ = time_operation(model.sparse_back_project, sinogram, pixel_indices)
         timings['parallel_sparse_back_project'] = t
     except Exception:
         pass
 
     # Hessian diagonal
-    t, _ = time_operation(model.compute_hessian_diagonal)
+    with step('parallel_hessian_diagonal'):
+        t, _ = time_operation(model.compute_hessian_diagonal)
     timings['parallel_hessian_diagonal'] = t
 
     # Direct filter
     try:
-        t, _ = time_operation(model.direct_filter, sinogram)
+        with step('parallel_direct_filter'):
+            t, _ = time_operation(model.direct_filter, sinogram)
         timings['parallel_direct_filter'] = t
     except Exception:
         pass
@@ -128,37 +145,44 @@ def profile_parallel_beam(phantom, vol_size, num_views):
     sinogram_noisy.block_until_ready()
 
     # MBIR reconstruction (1 iteration)
-    t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+    with step('parallel_mbir_recon'):
+        t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
     timings['parallel_mbir_recon'] = t
 
     # Proximal map (1 iteration, exercises VCD + QGGMRF internally)
     try:
-        t, _ = time_operation(model.prox_map, phantom, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+        with step('parallel_prox_map'):
+            t, _ = time_operation(model.prox_map, phantom, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
         timings['parallel_prox_map'] = t
     except Exception:
         pass
 
     # FBP reconstruction
-    t, _ = time_operation(model.fbp_recon, sinogram_noisy)
+    with step('parallel_fbp_recon'):
+        t, _ = time_operation(model.fbp_recon, sinogram_noisy)
     timings['parallel_fbp_recon'] = t
 
     # FBP filter
-    t, _ = time_operation(model.fbp_filter, sinogram_noisy)
+    with step('parallel_fbp_filter'):
+        t, _ = time_operation(model.fbp_filter, sinogram_noisy)
     timings['parallel_fbp_filter'] = t
 
     # Direct reconstruction
-    t, _ = time_operation(model.direct_recon, sinogram_noisy)
+    with step('parallel_direct_recon'):
+        t, _ = time_operation(model.direct_recon, sinogram_noisy)
     timings['parallel_direct_recon'] = t
 
     # Weight generation
     try:
-        t, _ = time_operation(mbirjax.gen_weights, sinogram, 'transmission')
+        with step('gen_weights_transmission'):
+            t, _ = time_operation(mbirjax.gen_weights, sinogram, 'transmission')
         timings['gen_weights_transmission'] = t
     except Exception:
         pass
 
     try:
-        t, _ = time_operation(mbirjax.gen_weights_mar, model, sinogram)
+        with step('parallel_gen_weights_mar'):
+            t, _ = time_operation(mbirjax.gen_weights_mar, model, sinogram)
         timings['parallel_gen_weights_mar'] = t
     except Exception:
         pass
@@ -181,18 +205,21 @@ def profile_cone_beam(phantom, vol_size, num_views):
     partitions = gen_pixel_partition((vol_size, vol_size, vol_size), 4)
 
     # Forward projection
-    t, sinogram = time_operation(model.forward_project, phantom)
+    with step('cone_forward_project'):
+        t, sinogram = time_operation(model.forward_project, phantom)
     timings['cone_forward_project'] = t
 
     # Back projection
-    t, _ = time_operation(model.back_project, sinogram)
+    with step('cone_back_project'):
+        t, _ = time_operation(model.back_project, sinogram)
     timings['cone_back_project'] = t
 
     # Sparse forward projection
     try:
         pixel_indices = partitions[0]
         voxel_values = phantom.reshape(vol_size * vol_size, vol_size)[pixel_indices]
-        t, _ = time_operation(model.sparse_forward_project, voxel_values, pixel_indices)
+        with step('cone_sparse_forward_project'):
+            t, _ = time_operation(model.sparse_forward_project, voxel_values, pixel_indices)
         timings['cone_sparse_forward_project'] = t
     except Exception:
         pass
@@ -200,18 +227,21 @@ def profile_cone_beam(phantom, vol_size, num_views):
     # Sparse back projection
     try:
         pixel_indices = partitions[0]
-        t, _ = time_operation(model.sparse_back_project, sinogram, pixel_indices)
+        with step('cone_sparse_back_project'):
+            t, _ = time_operation(model.sparse_back_project, sinogram, pixel_indices)
         timings['cone_sparse_back_project'] = t
     except Exception:
         pass
 
     # Hessian diagonal
-    t, _ = time_operation(model.compute_hessian_diagonal)
+    with step('cone_hessian_diagonal'):
+        t, _ = time_operation(model.compute_hessian_diagonal)
     timings['cone_hessian_diagonal'] = t
 
     # Direct filter
     try:
-        t, _ = time_operation(model.direct_filter, sinogram)
+        with step('cone_direct_filter'):
+            t, _ = time_operation(model.direct_filter, sinogram)
         timings['cone_direct_filter'] = t
     except Exception:
         pass
@@ -222,34 +252,40 @@ def profile_cone_beam(phantom, vol_size, num_views):
     sinogram_noisy.block_until_ready()
 
     # MBIR reconstruction (1 iteration)
-    t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+    with step('cone_mbir_recon'):
+        t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
     timings['cone_mbir_recon'] = t
 
     # Proximal map (1 iteration, exercises VCD + QGGMRF internally)
     try:
-        t, _ = time_operation(model.prox_map, phantom, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+        with step('cone_prox_map'):
+            t, _ = time_operation(model.prox_map, phantom, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
         timings['cone_prox_map'] = t
     except Exception:
         pass
 
     # FDK reconstruction
-    t, _ = time_operation(model.fdk_recon, sinogram_noisy)
+    with step('cone_fdk_recon'):
+        t, _ = time_operation(model.fdk_recon, sinogram_noisy)
     timings['cone_fdk_recon'] = t
 
     # FDK filter
-    t, _ = time_operation(model.fdk_filter, sinogram_noisy)
+    with step('cone_fdk_filter'):
+        t, _ = time_operation(model.fdk_filter, sinogram_noisy)
     timings['cone_fdk_filter'] = t
 
     # Direct reconstruction
     try:
-        t, _ = time_operation(model.direct_recon, sinogram_noisy)
+        with step('cone_direct_recon'):
+            t, _ = time_operation(model.direct_recon, sinogram_noisy)
         timings['cone_direct_recon'] = t
     except Exception:
         pass
 
     # Weight generation (MAR)
     try:
-        t, _ = time_operation(mbirjax.gen_weights_mar, model, sinogram)
+        with step('cone_gen_weights_mar'):
+            t, _ = time_operation(mbirjax.gen_weights_mar, model, sinogram)
         timings['cone_gen_weights_mar'] = t
     except Exception:
         pass
@@ -267,7 +303,8 @@ def profile_denoiser(phantom, vol_size):
     try:
         from mbirjax import QGGMRFDenoiser
         denoiser = QGGMRFDenoiser(noisy.shape)
-        t, _ = time_operation(denoiser.denoise, noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+        with step('qggmrf_denoise'):
+            t, _ = time_operation(denoiser.denoise, noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
         timings['qggmrf_denoise'] = t
     except Exception:
         pass
@@ -286,7 +323,8 @@ def profile_utilities(phantom, vol_size):
         from mbirjax import median_filter3d
         noisy = phantom + 0.1 * jax.random.normal(key, phantom.shape)
         noisy.block_until_ready()
-        t, _ = time_operation(median_filter3d, noisy)
+        with step('median_filter3d'):
+            t, _ = time_operation(median_filter3d, noisy)
         timings['median_filter3d'] = t
     except Exception:
         pass
@@ -320,7 +358,10 @@ def run_profiling_pass(vol_size, trace_dir=None):
 
     If trace_dir is provided, the entire pass is wrapped in
     jax.profiler.trace() to capture an XLA execution timeline.
+    Each operation is annotated with StepTraceAnnotation so XProf
+    can attribute GPU kernels to individual operations.
     """
+    _step_num[0] = 0
     num_views = vol_size // 2
     phantom = create_phantom(vol_size)
 
