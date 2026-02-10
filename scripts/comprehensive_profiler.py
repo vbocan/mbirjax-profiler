@@ -68,13 +68,13 @@ _step_num = [0]
 
 def time_operation(func, *args, **kwargs):
     """Time a single operation, ensuring JAX synchronization."""
-    t0 = time.time()
+    t0 = time.perf_counter()
     result = func(*args, **kwargs)
     if hasattr(result, 'block_until_ready'):
         result.block_until_ready()
     elif isinstance(result, tuple) and len(result) > 0 and hasattr(result[0], 'block_until_ready'):
         result[0].block_until_ready()
-    return time.time() - t0, result
+    return time.perf_counter() - t0, result
 
 
 @contextlib.contextmanager
@@ -330,23 +330,23 @@ def profile_utilities(phantom, vol_size):
         pass
 
     # Pixel partition generation variants
-    t0 = time.time()
+    t0 = time.perf_counter()
     gen_pixel_partition(recon_shape, 4)
-    timings['gen_pixel_partition'] = time.time() - t0
+    timings['gen_pixel_partition'] = time.perf_counter() - t0
 
     try:
         from mbirjax import gen_pixel_partition_blue_noise
-        t0 = time.time()
+        t0 = time.perf_counter()
         gen_pixel_partition_blue_noise(recon_shape, 4)
-        timings['gen_pixel_partition_blue_noise'] = time.time() - t0
+        timings['gen_pixel_partition_blue_noise'] = time.perf_counter() - t0
     except Exception:
         pass
 
     try:
         from mbirjax import gen_pixel_partition_grid
-        t0 = time.time()
+        t0 = time.perf_counter()
         gen_pixel_partition_grid(recon_shape, 4)
-        timings['gen_pixel_partition_grid'] = time.time() - t0
+        timings['gen_pixel_partition_grid'] = time.perf_counter() - t0
     except Exception:
         pass
 
@@ -375,90 +375,44 @@ def run_profiling_pass(vol_size):
 def collect_cost_analysis(vol_size):
     """Collect XLA cost analysis (FLOPs, bytes accessed) for key operations.
 
-    Attempts jax.jit(func).lower(*args).compile().cost_analysis() for each
-    operation. This may fail for internally-jitted methods; failures are
-    recorded as errors rather than raised.
+    MBIRJAX's public methods (forward_project, back_project, etc.) contain
+    Python control flow that cannot be re-traced by an outer jax.jit.
+    Instead, we target the inner JIT-compiled kernels:
+      - sparse_forward_project / sparse_back_project via model.projector_functions
+      - A representative 1-D convolution kernel for filter operations
+    Cost is reported per-partition (projection) or per-view (filter), with
+    the multiplier included so total cost can be derived.
     """
     costs = {}
     phantom = create_phantom(vol_size)
     num_views = vol_size // 2
+    num_partitions = 4
+    recon_shape = (vol_size, vol_size, vol_size)
 
-    # --- Parallel beam operations ---
-    angles = jnp.array(np.linspace(0, np.pi, num_views, endpoint=False), dtype=jnp.float32)
-    par_model = ParallelBeamModel(
-        sinogram_shape=(num_views, vol_size, vol_size),
-        angles=angles,
-    )
-    par_model.set_params(recon_shape=(vol_size, vol_size, vol_size))
-
-    sinogram_par = par_model.forward_project(phantom)
-    sinogram_par.block_until_ready()
-
-    par_ops = [
-        ('parallel_forward_project', par_model.forward_project, (phantom,)),
-        ('parallel_back_project', par_model.back_project, (sinogram_par,)),
-        ('parallel_hessian_diagonal', par_model.compute_hessian_diagonal, ()),
-        ('parallel_fbp_recon', par_model.fbp_recon, (sinogram_par,)),
-        ('parallel_fbp_filter', par_model.fbp_filter, (sinogram_par,)),
-    ]
-
-    # --- Cone beam operations ---
-    angles_cone = jnp.array(np.linspace(0, 2 * np.pi, num_views, endpoint=False), dtype=jnp.float32)
-    cone_model = ConeBeamModel(
-        sinogram_shape=(num_views, vol_size, vol_size),
-        angles=angles_cone,
-        source_detector_dist=4.0 * vol_size,
-        source_iso_dist=2.0 * vol_size,
-    )
-    cone_model.set_params(recon_shape=(vol_size, vol_size, vol_size))
-
-    sinogram_cone = cone_model.forward_project(phantom)
-    sinogram_cone.block_until_ready()
-
-    cone_ops = [
-        ('cone_forward_project', cone_model.forward_project, (phantom,)),
-        ('cone_back_project', cone_model.back_project, (sinogram_cone,)),
-        ('cone_hessian_diagonal', cone_model.compute_hessian_diagonal, ()),
-        ('cone_fdk_recon', cone_model.fdk_recon, (sinogram_cone,)),
-        ('cone_fdk_filter', cone_model.fdk_filter, (sinogram_cone,)),
-    ]
-
-    all_ops = par_ops + cone_ops
-
-    for name, func, args in all_ops:
-        try:
-            lowered = jax.jit(func).lower(*args)
-            compiled = lowered.compile()
-            cost = compiled.cost_analysis()
-            if cost and len(cost) > 0:
-                entry = {}
-                for k, v in cost[0].items():
-                    if isinstance(v, (int, float, np.integer, np.floating)):
-                        entry[k] = float(v)
-                    else:
-                        entry[k] = str(v)
-                costs[name] = entry
-                print(f"    {name}: {entry.get('flops', '?')} flops, "
-                      f"{entry.get('bytes accessed', '?')} bytes")
+    def extract_cost(jit_fn, *args):
+        """Lower, compile, and extract cost dict from a JIT'd function."""
+        lowered = jit_fn.lower(*args)
+        compiled = lowered.compile()
+        cost = compiled.cost_analysis()
+        # cost_analysis() returns a dict in newer JAX, a list in older versions
+        if isinstance(cost, dict):
+            cost_dict = cost
+        elif isinstance(cost, (list, tuple)) and len(cost) > 0:
+            cost_dict = cost[0]
+        else:
+            return None
+        entry = {}
+        for k, v in cost_dict.items():
+            if isinstance(v, (int, float, np.integer, np.floating)):
+                entry[k] = float(v)
             else:
-                costs[name] = {'note': 'cost_analysis returned empty'}
-        except Exception as e:
-            costs[name] = {'error': str(e)}
-            print(f"    {name}: cost analysis failed ({e})")
+                entry[k] = str(v)
+        return entry if entry else None
 
-    return costs
-
-
-def dump_hlo(vol_size, hlo_dir):
-    """Dump HLO text (StableHLO) for key operations.
-
-    Uses jax.jit(func).lower(*args).as_text() to get the XLA computation
-    graph in human-readable form.
-    """
-    hlo_dir.mkdir(parents=True, exist_ok=True)
-    phantom = create_phantom(vol_size)
-    num_views = vol_size // 2
-    dumped = 0
+    # --- Common inputs for projection kernels ---
+    partitions = gen_pixel_partition(recon_shape, num_partitions)
+    pixel_indices = partitions[0]
+    voxel_values = phantom.reshape(vol_size * vol_size, vol_size)[pixel_indices]
 
     # --- Parallel beam ---
     angles = jnp.array(np.linspace(0, np.pi, num_views, endpoint=False), dtype=jnp.float32)
@@ -466,9 +420,61 @@ def dump_hlo(vol_size, hlo_dir):
         sinogram_shape=(num_views, vol_size, vol_size),
         angles=angles,
     )
-    par_model.set_params(recon_shape=(vol_size, vol_size, vol_size))
+    par_model.set_params(recon_shape=recon_shape)
     sinogram_par = par_model.forward_project(phantom)
     sinogram_par.block_until_ready()
+    par_pf = par_model.projector_functions
+
+    par_kernel_ops = [
+        ('parallel_forward_project', 'sparse_forward_project',
+         par_pf.sparse_forward_project, (voxel_values, pixel_indices)),
+        ('parallel_back_project', 'sparse_back_project',
+         par_pf.sparse_back_project, (sinogram_par, pixel_indices)),
+        ('parallel_hessian_diagonal', 'sparse_back_project',
+         par_pf.sparse_back_project, (sinogram_par, pixel_indices)),
+    ]
+
+    for name, kernel_name, jit_fn, args in par_kernel_ops:
+        try:
+            entry = extract_cost(jit_fn, *args)
+            if entry:
+                entry['kernel'] = kernel_name
+                entry['num_partitions'] = num_partitions
+                costs[name] = entry
+                print(f"    {name}: {entry.get('flops', '?')} flops/partition, "
+                      f"{entry.get('bytes accessed', '?')} bytes")
+            else:
+                costs[name] = {'note': 'cost_analysis returned empty'}
+        except Exception as e:
+            costs[name] = {'error': str(e)}
+            print(f"    {name}: cost analysis failed ({e})")
+
+    # --- Parallel beam filter kernel (representative 1-D convolution) ---
+    det_cols = vol_size
+    recon_filter_rep = jnp.ones(2 * det_cols - 1, dtype=jnp.float32)
+    single_view = jnp.ones((vol_size, vol_size), dtype=jnp.float32)
+
+    @jax.jit
+    def par_filter_one_view(view):
+        return jax.vmap(lambda row: jnp.convolve(row, recon_filter_rep, mode='same'))(view)
+
+    try:
+        entry = extract_cost(par_filter_one_view, single_view)
+        if entry:
+            entry['kernel'] = 'filter_one_view (representative)'
+            entry['num_views'] = num_views
+            costs['parallel_fbp_filter'] = entry
+            print(f"    parallel_fbp_filter: {entry.get('flops', '?')} flops/view, "
+                  f"{entry.get('bytes accessed', '?')} bytes")
+        else:
+            costs['parallel_fbp_filter'] = {'note': 'cost_analysis returned empty'}
+    except Exception as e:
+        costs['parallel_fbp_filter'] = {'error': str(e)}
+        print(f"    parallel_fbp_filter: cost analysis failed ({e})")
+
+    costs['parallel_fbp_recon'] = {
+        'note': 'composite: parallel_fbp_filter + parallel_back_project',
+    }
 
     # --- Cone beam ---
     angles_cone = jnp.array(np.linspace(0, 2 * np.pi, num_views, endpoint=False), dtype=jnp.float32)
@@ -478,30 +484,142 @@ def dump_hlo(vol_size, hlo_dir):
         source_detector_dist=4.0 * vol_size,
         source_iso_dist=2.0 * vol_size,
     )
-    cone_model.set_params(recon_shape=(vol_size, vol_size, vol_size))
+    cone_model.set_params(recon_shape=recon_shape)
     sinogram_cone = cone_model.forward_project(phantom)
     sinogram_cone.block_until_ready()
+    cone_pf = cone_model.projector_functions
 
-    all_ops = [
-        ('parallel_forward_project', par_model.forward_project, (phantom,)),
-        ('parallel_back_project', par_model.back_project, (sinogram_par,)),
-        ('parallel_hessian_diagonal', par_model.compute_hessian_diagonal, ()),
-        ('parallel_fbp_recon', par_model.fbp_recon, (sinogram_par,)),
-        ('cone_forward_project', cone_model.forward_project, (phantom,)),
-        ('cone_back_project', cone_model.back_project, (sinogram_cone,)),
-        ('cone_hessian_diagonal', cone_model.compute_hessian_diagonal, ()),
-        ('cone_fdk_recon', cone_model.fdk_recon, (sinogram_cone,)),
+    cone_kernel_ops = [
+        ('cone_forward_project', 'sparse_forward_project',
+         cone_pf.sparse_forward_project, (voxel_values, pixel_indices)),
+        ('cone_back_project', 'sparse_back_project',
+         cone_pf.sparse_back_project, (sinogram_cone, pixel_indices)),
+        ('cone_hessian_diagonal', 'sparse_back_project',
+         cone_pf.sparse_back_project, (sinogram_cone, pixel_indices)),
     ]
 
-    for name, func, args in all_ops:
+    for name, kernel_name, jit_fn, args in cone_kernel_ops:
         try:
-            lowered = jax.jit(func).lower(*args)
+            entry = extract_cost(jit_fn, *args)
+            if entry:
+                entry['kernel'] = kernel_name
+                entry['num_partitions'] = num_partitions
+                costs[name] = entry
+                print(f"    {name}: {entry.get('flops', '?')} flops/partition, "
+                      f"{entry.get('bytes accessed', '?')} bytes")
+            else:
+                costs[name] = {'note': 'cost_analysis returned empty'}
+        except Exception as e:
+            costs[name] = {'error': str(e)}
+            print(f"    {name}: cost analysis failed ({e})")
+
+    # --- Cone beam filter kernel (representative 1-D convolution) ---
+    @jax.jit
+    def cone_filter_one_view(view):
+        return jax.vmap(lambda row: jnp.convolve(row, recon_filter_rep, mode='same'))(view)
+
+    try:
+        entry = extract_cost(cone_filter_one_view, single_view)
+        if entry:
+            entry['kernel'] = 'filter_one_view (representative)'
+            entry['num_views'] = num_views
+            costs['cone_fdk_filter'] = entry
+            print(f"    cone_fdk_filter: {entry.get('flops', '?')} flops/view, "
+                  f"{entry.get('bytes accessed', '?')} bytes")
+        else:
+            costs['cone_fdk_filter'] = {'note': 'cost_analysis returned empty'}
+    except Exception as e:
+        costs['cone_fdk_filter'] = {'error': str(e)}
+        print(f"    cone_fdk_filter: cost analysis failed ({e})")
+
+    costs['cone_fdk_recon'] = {
+        'note': 'composite: cone_fdk_filter + cone_back_project',
+    }
+
+    return costs
+
+
+def dump_hlo(vol_size, hlo_dir):
+    """Dump HLO text (StableHLO) for inner JIT-compiled kernels.
+
+    Targets the Projectors' sparse_forward/back_project functions and
+    a representative filter convolution kernel, which are the actual
+    GPU kernels suitable for FPGA analysis.
+    """
+    hlo_dir.mkdir(parents=True, exist_ok=True)
+    phantom = create_phantom(vol_size)
+    num_views = vol_size // 2
+    num_partitions = 4
+    recon_shape = (vol_size, vol_size, vol_size)
+    dumped = 0
+
+    partitions = gen_pixel_partition(recon_shape, num_partitions)
+    pixel_indices = partitions[0]
+    voxel_values = phantom.reshape(vol_size * vol_size, vol_size)[pixel_indices]
+
+    # --- Parallel beam ---
+    angles = jnp.array(np.linspace(0, np.pi, num_views, endpoint=False), dtype=jnp.float32)
+    par_model = ParallelBeamModel(
+        sinogram_shape=(num_views, vol_size, vol_size),
+        angles=angles,
+    )
+    par_model.set_params(recon_shape=recon_shape)
+    sinogram_par = par_model.forward_project(phantom)
+    sinogram_par.block_until_ready()
+    par_pf = par_model.projector_functions
+
+    # --- Cone beam ---
+    angles_cone = jnp.array(np.linspace(0, 2 * np.pi, num_views, endpoint=False), dtype=jnp.float32)
+    cone_model = ConeBeamModel(
+        sinogram_shape=(num_views, vol_size, vol_size),
+        angles=angles_cone,
+        source_detector_dist=4.0 * vol_size,
+        source_iso_dist=2.0 * vol_size,
+    )
+    cone_model.set_params(recon_shape=recon_shape)
+    sinogram_cone = cone_model.forward_project(phantom)
+    sinogram_cone.block_until_ready()
+    cone_pf = cone_model.projector_functions
+
+    # --- Projection / backprojection kernels ---
+    all_ops = [
+        ('sparse_forward_project_parallel', par_pf.sparse_forward_project,
+         (voxel_values, pixel_indices)),
+        ('sparse_back_project_parallel', par_pf.sparse_back_project,
+         (sinogram_par, pixel_indices)),
+        ('sparse_forward_project_cone', cone_pf.sparse_forward_project,
+         (voxel_values, pixel_indices)),
+        ('sparse_back_project_cone', cone_pf.sparse_back_project,
+         (sinogram_cone, pixel_indices)),
+    ]
+
+    for name, jit_fn, args in all_ops:
+        try:
+            lowered = jit_fn.lower(*args)
             hlo_text = lowered.as_text()
             out_path = hlo_dir / f'{name}_vol{vol_size}.txt'
             out_path.write_text(hlo_text)
             dumped += 1
         except Exception:
             pass
+
+    # --- Filter kernel ---
+    det_cols = vol_size
+    recon_filter = jnp.ones(2 * det_cols - 1, dtype=jnp.float32)
+    single_view = jnp.ones((vol_size, vol_size), dtype=jnp.float32)
+
+    @jax.jit
+    def filter_one_view(view):
+        return jax.vmap(lambda row: jnp.convolve(row, recon_filter, mode='same'))(view)
+
+    try:
+        lowered = filter_one_view.lower(single_view)
+        hlo_text = lowered.as_text()
+        out_path = hlo_dir / f'filter_kernel_vol{vol_size}.txt'
+        out_path.write_text(hlo_text)
+        dumped += 1
+    except Exception:
+        pass
 
     return dumped
 
