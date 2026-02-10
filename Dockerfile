@@ -1,10 +1,10 @@
-# MBIRJAX Profiler with Scalene for GPU/CPU/Memory Profiling
+# MBIRJAX GPU Profiler — XLA-level profiling for FPGA candidate discovery
 # CUDA runtime base — JAX bundles its own CUDA libs
 
 FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 LABEL maintainer="MBIRJAX Profiler Setup"
-LABEL description="JAX-based tomographic reconstruction with Scalene GPU/CPU/memory profiling for FPGA optimization"
+LABEL description="JAX-based tomographic reconstruction with XLA-level GPU profiling for FPGA optimization"
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,8 +30,8 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
 RUN python -m ensurepip --upgrade \
     && python -m pip install --no-cache-dir --upgrade pip
 
-# Install JAX with CUDA support, MBIRJAX, and Scalene
-RUN pip install --no-cache-dir "jax[cuda12]" mbirjax "scalene>=2.1.3"
+# Install JAX with CUDA support, MBIRJAX, and profiling tools
+RUN pip install --no-cache-dir "jax[cuda12]" mbirjax tensorboard xprof
 
 # Create output directory
 RUN mkdir -p ${OUTPUT_DIR}

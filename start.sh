@@ -1,5 +1,5 @@
 #!/bin/bash
-# MBIRJAX Profiler (Scalene GPU) - Line-level CPU/GPU/memory profiling
+# MBIRJAX GPU Profiler — XLA-level profiling for FPGA candidate discovery
 
 set -e
 cd "$(dirname "$0")"
@@ -14,28 +14,23 @@ show_menu() {
     clear
     echo ""
     echo "============================================================"
-    echo "  MBIRJAX Profiler (Scalene GPU)"
+    echo "  MBIRJAX GPU Profiler (XLA / TensorBoard)"
     echo "============================================================"
     echo ""
-    echo "  [R] Run profiler"
-    echo "  [V] View Scalene profile"
+    echo "  [R] Run profiler  (captures XLA traces + cost analysis + HLO)"
+    echo "  [T] TensorBoard   (view XLA traces in browser)"
     echo "  [Q] Quit"
     echo ""
 }
 
 run_profile() {
     echo ""
-    echo "Running Scalene profiler with GPU..."
+    echo "Running GPU profiler..."
     echo "Volume sizes: 32, 64, 128, 256"
-    echo "Runs per size: 3"
+    echo "Runs per size: 3 (run 2 is traced)"
     echo ""
 
-    timestamp=$(date +%Y%m%d_%H%M%S)
-    json_file="scalene_profile_${timestamp}.json"
-    html_file="scalene_profile_${timestamp}.html"
-
-    # Run Scalene profiler (produces JSON)
-    docker compose run --rm mbirjax-profiler python -m scalene run --cpu-only --profile-all --profile-only mbirjax -o "/output/${json_file}" /scripts/comprehensive_profiler.py
+    docker compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py
 
     if [ $? -ne 0 ]; then
         echo ""
@@ -44,76 +39,82 @@ run_profile() {
         return
     fi
 
-    # Convert JSON profile to self-contained HTML
-    echo ""
-    echo "Generating HTML report..."
-    docker compose run --rm mbirjax-profiler python -m scalene view --standalone "/output/${json_file}"
-
-    # Rename the generated HTML to include timestamp
-    if [ -f "output/scalene-profile.html" ]; then
-        mv "output/scalene-profile.html" "output/${html_file}"
-    fi
-
     echo ""
     echo "[OK] Profiling completed"
     echo ""
     echo "Output:"
-    echo "  Scalene HTML: output/${html_file}"
-    echo "  Scalene JSON: output/${json_file}"
-    echo "  Timing JSON:  output/mbirjax_profile_*.json"
+    echo "  Timing + cost: output/mbirjax_profile_*.json"
+    echo "  XLA traces:    output/jax_traces/"
+    echo "  HLO dumps:     output/hlo_dumps/"
+    echo ""
+    echo "Next: press [T] to launch TensorBoard"
     echo ""
     read -p "Press Enter to continue"
 }
 
-view_profile() {
-    profiles=(output/scalene_profile_*.html)
-
-    if [ ! -e "${profiles[0]}" ]; then
+start_tensorboard() {
+    # Find trace directories
+    if [ ! -d "output/jax_traces" ]; then
         echo ""
-        echo "No Scalene HTML profiles found. Run profiler first."
+        echo "No XLA traces found. Run the profiler first."
+        echo ""
+        read -p "Press Enter to continue"
+        return
+    fi
+
+    sessions=(output/jax_traces/*/)
+    if [ ! -d "${sessions[0]}" ]; then
+        echo ""
+        echo "No XLA traces found. Run the profiler first."
         echo ""
         read -p "Press Enter to continue"
         return
     fi
 
     echo ""
-    echo "Available Scalene profiles:"
+    echo "Available trace sessions:"
     echo ""
 
+    # Sort descending (newest first)
+    IFS=$'\n' sorted=($(printf '%s\n' "${sessions[@]}" | sort -r)); unset IFS
+
     i=1
-    for prof in "${profiles[@]}"; do
-        name=$(basename "$prof")
-        size=$(du -k "$prof" | cut -f1)
-        date=$(stat -c %y "$prof" 2>/dev/null || stat -f %Sm "$prof" 2>/dev/null)
-        echo "  [$i] $name"
-        echo "      ${size} KB  |  $date"
+    for session in "${sorted[@]}"; do
+        name=$(basename "$session")
+        vol_count=$(find "$session" -maxdepth 1 -type d | wc -l)
+        vol_count=$((vol_count - 1))
+        echo "  [$i] $name  ($vol_count volume sizes)"
         ((i++))
     done
 
     echo ""
-    read -p "Select profile number (or 'q' to cancel): " selection
+    read -p "Select session (Enter for latest, 'q' to cancel): " selection
 
     if [ "$selection" = "q" ]; then
         return
     fi
 
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#profiles[@]}" ]; then
-        echo ""
+    if [ -z "$selection" ]; then
+        selected=$(basename "${sorted[0]}")
+    elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#sorted[@]}" ]; then
+        selected=$(basename "${sorted[$((selection-1))]}")
+    else
         echo "Invalid selection"
         read -p "Press Enter to continue"
         return
     fi
 
-    profile_file="${profiles[$((selection-1))]}"
-    full_path="$(pwd)/$profile_file"
+    logdir="/output/jax_traces/$selected"
 
     echo ""
-    echo "Opening in browser: $(basename "$profile_file")"
-
-    xdg-open "$full_path" 2>/dev/null || open "$full_path" 2>/dev/null || echo "Open in browser: $full_path"
-
+    echo "Launching TensorBoard..."
+    echo "  Log dir: $logdir"
+    echo "  URL:     http://localhost:6006"
     echo ""
-    read -p "Press Enter to continue"
+    echo "Press Ctrl+C to stop TensorBoard"
+    echo ""
+
+    docker compose run --rm -p 6006:6006 mbirjax-profiler tensorboard --logdir="$logdir" --host=0.0.0.0 --port=6006
 }
 
 # Main loop
@@ -123,7 +124,7 @@ while true; do
 
     case "${choice^^}" in
         R) run_profile ;;
-        V) view_profile ;;
+        T) start_tensorboard ;;
         Q) echo ""; exit 0 ;;
         *) echo "Invalid choice"; read -p "Press Enter to continue" ;;
     esac

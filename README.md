@@ -1,6 +1,6 @@
-# MBIRJAX Profiler
+# MBIRJAX GPU Profiler
 
-GPU-accelerated profiling of all MBIRJAX operations using Scalene for line-level CPU/GPU/memory analysis, targeting FPGA candidate identification.
+XLA-level GPU profiling of all MBIRJAX operations for FPGA candidate identification. Uses `jax.profiler.trace` to capture GPU execution timelines viewable in TensorBoard/XProf, plus XLA cost analysis and HLO computation graph dumps.
 
 ## Prerequisites
 
@@ -28,29 +28,53 @@ chmod +x start.sh
 
 Or run directly:
 ```bash
-docker compose run --rm mbirjax-profiler python -m scalene run --cpu-only --profile-all --profile-only mbirjax -o /output/scalene_profile.json /scripts/comprehensive_profiler.py
+# Profile
+docker compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py
+
+# View traces in TensorBoard
+docker compose run --rm -p 6006:6006 mbirjax-profiler tensorboard --logdir=/output/jax_traces --host=0.0.0.0 --port=6006
 ```
+
+Then open http://localhost:6006.
 
 ## What It Does
 
-Profiles every MBIRJAX operation across multiple volume sizes (32^3, 64^3, 128^3, 256^3) with 3 runs each. Scalene wraps the profiling script externally, providing line-level CPU/GPU/memory breakdown with no code changes needed.
+Profiles every MBIRJAX operation across multiple volume sizes (32^3, 64^3, 128^3, 256^3) with 3 runs per size:
 
-**Operations profiled:**
-- ParallelBeamModel: forward_project, back_project, hessian_diagonal, mbir_recon, fbp_recon, fbp_filter, direct_recon
-- ConeBeamModel: forward_project, back_project, hessian_diagonal, mbir_recon, fdk_recon, fdk_filter
-- Utilities: median_filter3d, gen_pixel_partition
+- **Run 1**: JIT warmup (XLA compilation happens here)
+- **Run 2**: Traced via `jax.profiler.trace` (captures XLA execution timeline)
+- **Run 3**: Timing only (for comparison)
+
+After timing runs, collects XLA cost analysis (FLOPs, bytes accessed) and dumps HLO computation graphs for key operations.
+
+**Operations profiled (28):**
+- ParallelBeamModel: forward_project, back_project, sparse variants, hessian_diagonal, direct_filter, mbir_recon, prox_map, fbp_recon, fbp_filter, direct_recon, weight generation
+- ConeBeamModel: forward_project, back_project, sparse variants, hessian_diagonal, direct_filter, mbir_recon, prox_map, fdk_recon, fdk_filter, direct_recon, weight generation
+- QGGMRFDenoiser: denoise
+- Utilities: median_filter3d, gen_pixel_partition variants
 
 ## Output
 
-Each profiling run produces three files in `output/`:
+Each profiling run produces:
 
-| File | Source | Purpose |
-|------|--------|---------|
-| `scalene_profile_*.html` | Scalene | Interactive CPU/GPU/memory line-level profile (open in browser) |
-| `scalene_profile_*.json` | Scalene | Machine-readable Scalene data |
-| `mbirjax_profile_*.json` | Script | Per-operation timing with `block_until_ready()` synchronization |
+| Output | Location | Purpose |
+|--------|----------|---------|
+| Timing + cost analysis JSON | `output/mbirjax_profile_*.json` | Wall-clock timing, XLA FLOPs/bytes estimates |
+| XLA traces | `output/jax_traces/<timestamp>/vol<N>/` | TensorBoard/XProf GPU execution timeline |
+| HLO dumps | `output/hlo_dumps/<timestamp>/` | XLA computation graphs per operation |
 
-Timing JSON structure:
+### XProf tools to use
+
+| Tool | What It Shows | FPGA Relevance |
+|------|---------------|----------------|
+| Trace Viewer | GPU compute vs memory transfer timeline | Identifies memory transfer bottlenecks |
+| Roofline Analysis | Arithmetic intensity per operation | Classifies compute-bound vs memory-bound ops |
+| HLO Op Stats | Per-operation time, GFLOPS/s, bandwidth | Ranks operations by cost |
+| GPU Kernel Stats | Per-kernel metrics mapped to JAX ops | Ground truth kernel timing |
+| Memory Viewer | Buffer lifetimes and peak allocation | FPGA on-chip memory sizing |
+
+### JSON structure
+
 ```json
 {
   "environment": {
@@ -60,22 +84,26 @@ Timing JSON structure:
     "mbirjax_version": "..."
   },
   "measurements": [
-    {"operation": "parallel_forward_project", "volume_size": 64, "run": 1, "time": 0.234}
-  ]
+    {"operation": "parallel_forward_project", "volume_size": 64, "run": 1, "time": 0.234, "traced": false}
+  ],
+  "cost_analysis": {
+    "64": {
+      "parallel_forward_project": {"flops": 123456, "bytes accessed": 78900}
+    }
+  }
 }
 ```
 
-## Why Scalene
+## Comprehensive XLA HLO Dumps
 
-- **GPU profiling**: Tracks time spent on GPU vs CPU per line of code
-- **Line-level granularity**: Identifies exact lines consuming GPU/CPU/memory resources
-- **Memory tracking**: Shows allocation patterns useful for FPGA memory planning
-- **Self-contained HTML**: No server needed (unlike snakeviz) — just open in a browser
-- **JAX compatible**: v2.1.3+ fixes the JAX hanging issue (plasma-umass/scalene#106)
+For a full dump of all XLA compilation passes (large output), uncomment the `XLA_FLAGS` line in `docker-compose.yml`:
+
+```yaml
+- XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true
+```
 
 ## Verification
 
-After building, verify the setup:
 ```bash
 # GPU visible in container
 docker compose run --rm mbirjax-profiler nvidia-smi

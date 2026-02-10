@@ -1,5 +1,5 @@
-# MBIRJAX Profiler for FPGA Optimization Analysis
-# GPU profiling with Scalene — requires Docker Compose V2
+# MBIRJAX GPU Profiler for FPGA Optimization Analysis
+# XLA-level profiling with jax.profiler.trace + TensorBoard/XProf
 
 services:
   mbirjax-profiler:
@@ -12,13 +12,14 @@ services:
     shm_size: '16gb'
 
     environment:
-      # JAX XLA configuration for GPU profiling
+      # JAX XLA configuration
       - JAX_PLATFORMS=cuda,cpu
       - XLA_PYTHON_CLIENT_PREALLOCATE=true
       - XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
       - TF_CPP_MIN_LOG_LEVEL=2
-      # Output directory for profiling results
       - OUTPUT_DIR=/output
+      # Enable for comprehensive XLA HLO graph dumps (produces large output):
+      # - XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true
 
     deploy:
       resources:
@@ -32,6 +33,9 @@ services:
       memlock:
         soft: -1
         hard: -1
+
+    ports:
+      - "6006:6006"  # TensorBoard
 
     volumes:
       - ./output:/output
