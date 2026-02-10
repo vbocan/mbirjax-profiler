@@ -105,7 +105,41 @@ function Start-TensorBoard {
         return
     }
 
-    $logdir = "/output/jax_traces/$selected"
+    # List volume sizes in selected session
+    $volDirs = Get-ChildItem -Path "output/jax_traces/$selected" -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name
+
+    if ($volDirs.Count -eq 0) {
+        Write-Host ""
+        Write-Host "No volume traces found in session $selected" -ForegroundColor Red
+        Read-Host "Press Enter to continue"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Available volume sizes:" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  [A] All volumes (overview)" -ForegroundColor White
+
+    for ($j = 0; $j -lt $volDirs.Count; $j++) {
+        Write-Host "  [$($j + 1)] $($volDirs[$j].Name)" -ForegroundColor White
+    }
+
+    Write-Host ""
+    $volSelection = Read-Host "Select volume (Enter for all, 'q' to cancel)"
+
+    if ($volSelection -eq 'q') { return }
+
+    if ([string]::IsNullOrWhiteSpace($volSelection) -or $volSelection.ToUpper() -eq 'A') {
+        $logdir = "/output/jax_traces/$selected"
+    } elseif ([int]::TryParse($volSelection, [ref]$null) -and [int]$volSelection -ge 1 -and [int]$volSelection -le $volDirs.Count) {
+        $volName = $volDirs[[int]$volSelection - 1].Name
+        $logdir = "/output/jax_traces/$selected/$volName"
+    } else {
+        Write-Host "Invalid selection" -ForegroundColor Red
+        Read-Host "Press Enter to continue"
+        return
+    }
 
     Write-Host ""
     Write-Host "Launching TensorBoard..." -ForegroundColor Cyan
@@ -114,6 +148,8 @@ function Start-TensorBoard {
     Write-Host ""
     Write-Host "Press Ctrl+C to stop TensorBoard" -ForegroundColor Yellow
     Write-Host ""
+
+    Start-Process "http://localhost:6006"
 
     Set-Location $PSScriptRoot
     docker compose run --rm -p 6006:6006 mbirjax-profiler tensorboard --logdir="$logdir" --host=0.0.0.0 --port=6006

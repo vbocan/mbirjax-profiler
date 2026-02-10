@@ -105,7 +105,45 @@ start_tensorboard() {
         return
     fi
 
-    logdir="/output/jax_traces/$selected"
+    # List volume sizes in selected session
+    vol_dirs=(output/jax_traces/$selected/*/)
+    if [ ! -d "${vol_dirs[0]}" ]; then
+        echo ""
+        echo "No volume traces found in session $selected"
+        read -p "Press Enter to continue"
+        return
+    fi
+
+    IFS=$'\n' sorted_vols=($(printf '%s\n' "${vol_dirs[@]}" | sort)); unset IFS
+
+    echo ""
+    echo "Available volume sizes:"
+    echo ""
+    echo "  [A] All volumes (overview)"
+
+    j=1
+    for vol in "${sorted_vols[@]}"; do
+        echo "  [$j] $(basename "$vol")"
+        ((j++))
+    done
+
+    echo ""
+    read -p "Select volume (Enter for all, 'q' to cancel): " vol_selection
+
+    if [ "$vol_selection" = "q" ]; then
+        return
+    fi
+
+    if [ -z "$vol_selection" ] || [ "${vol_selection^^}" = "A" ]; then
+        logdir="/output/jax_traces/$selected"
+    elif [[ "$vol_selection" =~ ^[0-9]+$ ]] && [ "$vol_selection" -ge 1 ] && [ "$vol_selection" -le "${#sorted_vols[@]}" ]; then
+        vol_name=$(basename "${sorted_vols[$((vol_selection-1))]}")
+        logdir="/output/jax_traces/$selected/$vol_name"
+    else
+        echo "Invalid selection"
+        read -p "Press Enter to continue"
+        return
+    fi
 
     echo ""
     echo "Launching TensorBoard..."
@@ -114,6 +152,13 @@ start_tensorboard() {
     echo ""
     echo "Press Ctrl+C to stop TensorBoard"
     echo ""
+
+    # Open browser
+    if command -v xdg-open &> /dev/null; then
+        xdg-open "http://localhost:6006" &
+    elif command -v open &> /dev/null; then
+        open "http://localhost:6006"
+    fi
 
     docker compose run --rm -p 6006:6006 mbirjax-profiler tensorboard --logdir="$logdir" --host=0.0.0.0 --port=6006
 }

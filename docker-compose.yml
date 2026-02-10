@@ -19,7 +19,7 @@ services:
       - TF_CPP_MIN_LOG_LEVEL=2
       - OUTPUT_DIR=/output
       # XLA HLO graph dumps (text + interactive HTML graphs)
-      - XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true
+      - XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true --xla_gpu_enable_command_buffer=
 
     deploy:
       resources:

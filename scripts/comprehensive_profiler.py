@@ -46,7 +46,7 @@ OUTPUT_DIR = Path('/output')
 # Fixed volume sizes for complexity analysis
 VOLUME_SIZES = [32, 64, 128, 256]
 RUNS_PER_SIZE = 3
-TRACE_RUN = 1  # 0-indexed; capture traces on second run (after JIT warmup)
+TRACE_RUN = 1  # 0-indexed; capture traces on second run (after JIT warmup, with command buffers disabled for kernel visibility)
 
 
 def create_phantom(size: int) -> jnp.ndarray:
@@ -482,7 +482,7 @@ def main():
     print(f"Devices:      {jax.devices()}")
     print(f"JAX version:  {jax.__version__}")
     print(f"Volume sizes: {VOLUME_SIZES}")
-    print(f"Runs/size:    {RUNS_PER_SIZE} (run {TRACE_RUN + 1} is traced)")
+    print(f"Runs/size:    {RUNS_PER_SIZE} (run 1 is JIT warmup, run 2 is traced, run 3 is timing)")
 
     results = {
         'timestamp': datetime.now().isoformat(),
