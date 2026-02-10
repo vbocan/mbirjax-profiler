@@ -55,9 +55,10 @@ function Run-Profile {
     Write-Host "[OK] Profiling completed" -ForegroundColor Green
     Write-Host ""
     Write-Host "Output:" -ForegroundColor Cyan
-    Write-Host "  Timing + cost: output/mbirjax_profile_*.json" -ForegroundColor Gray
-    Write-Host "  XLA traces:    output/jax_traces/" -ForegroundColor Gray
-    Write-Host "  HLO dumps:     output/hlo_dumps/" -ForegroundColor Gray
+    Write-Host "  Timing + cost:  output/mbirjax_profile_*.json" -ForegroundColor Gray
+    Write-Host "  XLA traces:     output/jax_traces/" -ForegroundColor Gray
+    Write-Host "  HLO text:       output/hlo_dumps/" -ForegroundColor Gray
+    Write-Host "  HLO graphs:     output/hlo_dumps_xla/*.html  (open in browser)" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Next: press [T] to launch TensorBoard" -ForegroundColor Yellow
     Write-Host ""

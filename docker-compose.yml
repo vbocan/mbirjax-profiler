@@ -18,8 +18,8 @@ services:
       - XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
       - TF_CPP_MIN_LOG_LEVEL=2
       - OUTPUT_DIR=/output
-      # Enable for comprehensive XLA HLO graph dumps (produces large output):
-      # - XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true
+      # XLA HLO graph dumps (text + interactive HTML graphs)
+      - XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true
 
     deploy:
       resources:

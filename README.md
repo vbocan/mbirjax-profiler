@@ -94,13 +94,15 @@ Each profiling run produces:
 }
 ```
 
-## Comprehensive XLA HLO Dumps
+## XLA HLO Graph Visualization
 
-For a full dump of all XLA compilation passes (large output), uncomment the `XLA_FLAGS` line in `docker-compose.yml`:
+The profiler produces HLO graphs at two levels:
 
-```yaml
-- XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true
-```
+1. **Per-operation HLO text** (`output/hlo_dumps/<timestamp>/`) — programmatic dumps from the profiler script, one file per operation per volume size. Grep-able and diff-able.
+
+2. **Comprehensive XLA HTML graphs** (`output/hlo_dumps_xla/`) — produced automatically via `XLA_FLAGS`. These are interactive HTML files showing the full computation graph with zoom/pan. Open any `.html` file in a browser to explore the graph visually.
+
+The comprehensive dumps include every XLA compilation pass (before and after optimization), so the output is large. To disable, comment out the `XLA_FLAGS` line in `docker-compose.yml`.
 
 ## Verification
 
