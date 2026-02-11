@@ -44,7 +44,6 @@ services:
 
     ports:
       - "6006:6006"  # TensorBoard
-      - "9012:9012"  # JAX profiler server (for XProf CAPTURE PROFILE)
 
     volumes:
       - ./output:/output

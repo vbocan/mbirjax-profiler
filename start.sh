@@ -1,7 +1,6 @@
 #!/bin/bash
 # MBIRJAX GPU Profiler — XLA-level profiling for FPGA candidate discovery
 
-set -e
 cd "$(dirname "$0")"
 
 # Check Docker
@@ -17,8 +16,7 @@ show_menu() {
     echo "  MBIRJAX GPU Profiler (XLA / TensorBoard)"
     echo "============================================================"
     echo ""
-    echo "  [R] Run profiler  (file-based trace)"
-    echo "  [S] Server mode   (live XProf capture — best for HLO Op Profile)"
+    echo "  [R] Run profiler  (captures XLA traces + cost analysis + HLO)"
     echo "  [T] TensorBoard   (view XLA traces in browser)"
     echo "  [Q] Quit"
     echo ""
@@ -26,14 +24,12 @@ show_menu() {
 
 run_profile() {
     echo ""
-    echo "Running GPU profiler (file-based trace)..."
+    echo "Running GPU profiler..."
     echo "Volume sizes: 32, 64, 128, 256"
-    echo "Runs per size: 3 (all runs traced)"
+    echo "Runs per size: 3 (run 2 is traced)"
     echo ""
 
-    docker compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py
-
-    if [ $? -ne 0 ]; then
+    if ! docker compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py; then
         echo ""
         echo "[FAIL] Profiling failed"
         read -p "Press Enter to continue"
@@ -51,53 +47,6 @@ run_profile() {
     echo ""
     echo "Next: press [T] to launch TensorBoard"
     echo ""
-    read -p "Press Enter to continue"
-}
-
-run_server_mode() {
-    echo ""
-    echo "Server mode: profiler + TensorBoard run together."
-    echo "You'll use XProf's CAPTURE PROFILE for live GPU profiling."
-    echo ""
-    echo "Step 1: Starting TensorBoard + profiler server..."
-    echo "Step 2: Open http://localhost:6006 in your browser"
-    echo "Step 3: Follow the on-screen prompts"
-    echo ""
-
-    # Run profiler with --server flag, with both ports exposed.
-    # Use -it for interactive input (Enter to proceed between volumes).
-    docker compose run --rm \
-        -p 6006:6006 \
-        -p 9012:9012 \
-        mbirjax-profiler \
-        bash -c '
-            # Start TensorBoard in the background
-            tensorboard --logdir=/output/jax_traces --host=0.0.0.0 --port=6006 &
-            TB_PID=$!
-            sleep 3
-            echo ""
-            echo "TensorBoard running at http://localhost:6006"
-            echo ""
-
-            # Run profiler in server mode
-            python /scripts/comprehensive_profiler.py --server --port 9012
-
-            echo ""
-            echo "Profiling complete. TensorBoard still running."
-            echo "Check results in the Profile tab, then press Enter to exit."
-            read
-            kill $TB_PID 2>/dev/null
-        '
-
-    if [ $? -ne 0 ]; then
-        echo ""
-        echo "[FAIL] Server mode failed"
-        read -p "Press Enter to continue"
-        return
-    fi
-
-    echo ""
-    echo "[OK] Server mode completed"
     read -p "Press Enter to continue"
 }
 
@@ -218,7 +167,6 @@ while true; do
 
     case "${choice^^}" in
         R) run_profile ;;
-        S) run_server_mode ;;
         T) start_tensorboard ;;
         Q) echo ""; exit 0 ;;
         *) echo "Invalid choice"; read -p "Press Enter to continue" ;;

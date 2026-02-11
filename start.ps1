@@ -35,7 +35,7 @@ function Show-Menu {
 
 function Run-Profile {
     Write-Host ""
-    Write-Host "Running GPU profiler..." -ForegroundColor Cyan
+    Write-Host "Running GPU profiler (file-based trace)..." -ForegroundColor Cyan
     Write-Host "Volume sizes: 32, 64, 128, 256" -ForegroundColor Gray
     Write-Host "Runs per size: 3 (run 2 is traced)" -ForegroundColor Gray
     Write-Host ""
