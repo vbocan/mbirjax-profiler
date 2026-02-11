@@ -7,9 +7,11 @@ Captures JAX profiler traces (viewable in TensorBoard/XProf),
 XLA cost analysis, and HLO computation graphs per operation.
 
 For each volume size, three runs are performed:
-  - Run 1: JIT warmup (compilation happens here)
-  - Run 2: Traced via jax.profiler.trace (captures XLA execution timeline)
-  - Run 3: Timing only (for comparison with traced run)
+  - Run 1: JIT warmup (compilation happens here — HLO module protos captured)
+  - Run 2: Post-warmup execution (kernel timing captured)
+  - Run 3: Timing only (for comparison)
+All runs are wrapped in a single jax.profiler.trace so XProf can correlate
+HLO module protos (from JIT compilation) with kernel execution timing.
 
 Output:
   jax_traces/<timestamp>/vol<N>/   - TensorBoard/XProf trace per volume size
@@ -27,6 +29,7 @@ import sys
 import time
 import json
 import contextlib
+import argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -46,7 +49,8 @@ OUTPUT_DIR = Path('/output')
 # Fixed volume sizes for complexity analysis
 VOLUME_SIZES = [32, 64, 128, 256]
 RUNS_PER_SIZE = 3
-TRACE_RUN = 1  # 0-indexed; capture traces on second run (after JIT warmup, with command buffers disabled for kernel visibility)
+TRACE_RUN = 1  # 0-indexed; execution-only trace (after JIT warmup)
+TRACE_ALL = True  # Wrap ALL runs in a single trace so XProf captures HLO module protos during JIT compilation (run 0) AND kernel timing during execution (runs 1+)
 
 
 def create_phantom(size: int) -> jnp.ndarray:
@@ -624,7 +628,137 @@ def dump_hlo(vol_size, hlo_dir):
     return dumped
 
 
+def main_file_trace(vol_sizes, trace_base, hlo_dir, results):
+    """File-based tracing mode: captures traces to disk via jax.profiler.trace."""
+    for vol_size in vol_sizes:
+        print(f"\n{'=' * 60}")
+        print(f"Volume size: {vol_size}\u00b3 (views: {vol_size // 2})")
+        print("=" * 60)
+
+        trace_dir = trace_base / f'vol{vol_size}'
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        all_runs_ctx = jax.profiler.trace(str(trace_dir)) if TRACE_ALL else contextlib.nullcontext()
+
+        with all_runs_ctx:
+            for run in range(RUNS_PER_SIZE):
+                if not TRACE_ALL and run == TRACE_RUN:
+                    per_run_dir = trace_base / f'vol{vol_size}'
+                    per_run_dir.mkdir(parents=True, exist_ok=True)
+                    print(f"\n  Run {run + 1}/{RUNS_PER_SIZE} [TRACED -> {per_run_dir.relative_to(OUTPUT_DIR)}]")
+                    per_run_ctx = jax.profiler.trace(str(per_run_dir))
+                else:
+                    per_run_ctx = contextlib.nullcontext()
+                    label = "warmup+compile" if run == 0 else ""
+                    suffix = f" [{label}]" if label else ""
+                    traced_label = " [TRACED]" if TRACE_ALL else ""
+                    print(f"\n  Run {run + 1}/{RUNS_PER_SIZE}{suffix}{traced_label}")
+
+                with per_run_ctx:
+                    timings = run_profiling_pass(vol_size)
+
+                for operation, elapsed in timings.items():
+                    results['measurements'].append({
+                        'operation': operation,
+                        'volume_size': vol_size,
+                        'run': run + 1,
+                        'time': elapsed,
+                        'traced': TRACE_ALL or run == TRACE_RUN,
+                    })
+                    print(f"    {operation}: {elapsed:.4f}s")
+
+        # Cost analysis (FLOPs, bytes accessed, arithmetic intensity)
+        print(f"\n  Cost analysis (vol {vol_size}\u00b3):")
+        costs = collect_cost_analysis(vol_size)
+        results['cost_analysis'][str(vol_size)] = costs
+
+        # HLO computation graph dumps
+        print(f"\n  HLO dumps (vol {vol_size}\u00b3):")
+        n_dumped = dump_hlo(vol_size, hlo_dir)
+        print(f"    {n_dumped} HLO graphs saved to {hlo_dir.relative_to(OUTPUT_DIR)}/")
+
+
+def main_server_mode(vol_sizes, hlo_dir, results, server_port=9012):
+    """Server-based profiling mode: starts a profiler gRPC server so XProf
+    can do a live CAPTURE PROFILE.  This gives XProf full control over CUPTI
+    data collection and produces the richest profiling data (HLO Op Profile,
+    Roofline, etc.).
+
+    Workflow:
+      1. Script starts profiler server and does JIT warmup.
+      2. TensorBoard is launched separately (or is already running).
+      3. User clicks CAPTURE PROFILE in XProf, entering the server address.
+      4. Script runs the profiling pass while XProf captures GPU data.
+    """
+    # Start profiler server BEFORE any JAX computation
+    jax.profiler.start_server(server_port)
+    print(f"\n  Profiler server started on port {server_port}")
+
+    for vol_size in vol_sizes:
+        print(f"\n{'=' * 60}")
+        print(f"Volume size: {vol_size}\u00b3 (views: {vol_size // 2})")
+        print("=" * 60)
+
+        # Run 1: JIT warmup (compile all kernels)
+        print(f"\n  Run 1/{RUNS_PER_SIZE} [warmup+compile]")
+        timings = run_profiling_pass(vol_size)
+        for op, elapsed in timings.items():
+            results['measurements'].append({
+                'operation': op, 'volume_size': vol_size,
+                'run': 1, 'time': elapsed, 'traced': False,
+            })
+            print(f"    {op}: {elapsed:.4f}s")
+
+        # Prompt user to start capture before the execution runs
+        print(f"\n  ┌─────────────────────────────────────────────────┐")
+        print(f"  │  Ready for XProf capture (vol {vol_size}\u00b3)              │")
+        print(f"  │                                                 │")
+        print(f"  │  In TensorBoard (http://localhost:6006):        │")
+        print(f"  │    1. Go to the Profile tab                     │")
+        print(f"  │    2. Click CAPTURE PROFILE                     │")
+        print(f"  │    3. Profile Service URL: localhost:{server_port}       │")
+        print(f"  │    4. Duration: 30000 ms                        │")
+        print(f"  │    5. Click CAPTURE                             │")
+        print(f"  │                                                 │")
+        print(f"  │  Then press Enter here to start execution...    │")
+        print(f"  └─────────────────────────────────────────────────┘")
+
+        try:
+            input()
+        except EOFError:
+            # Non-interactive: wait 5 seconds for capture to start
+            print("  (non-interactive mode, starting in 5 seconds)")
+            time.sleep(5)
+
+        # Runs 2+: execution runs (XProf captures these)
+        for run in range(1, RUNS_PER_SIZE):
+            print(f"\n  Run {run + 1}/{RUNS_PER_SIZE} [CAPTURE ACTIVE]")
+            timings = run_profiling_pass(vol_size)
+            for op, elapsed in timings.items():
+                results['measurements'].append({
+                    'operation': op, 'volume_size': vol_size,
+                    'run': run + 1, 'time': elapsed, 'traced': True,
+                })
+                print(f"    {op}: {elapsed:.4f}s")
+
+        # Cost analysis + HLO dumps (outside capture window)
+        print(f"\n  Cost analysis (vol {vol_size}\u00b3):")
+        costs = collect_cost_analysis(vol_size)
+        results['cost_analysis'][str(vol_size)] = costs
+
+        print(f"\n  HLO dumps (vol {vol_size}\u00b3):")
+        n_dumped = dump_hlo(vol_size, hlo_dir)
+        print(f"    {n_dumped} HLO graphs saved to {hlo_dir.relative_to(OUTPUT_DIR)}/")
+
+
 def main():
+    parser = argparse.ArgumentParser(description='MBIRJAX GPU Profiler')
+    parser.add_argument('--server', action='store_true',
+                        help='Use profiler server mode (recommended). '
+                             'Start TensorBoard separately and use CAPTURE PROFILE.')
+    parser.add_argument('--port', type=int, default=9012,
+                        help='Profiler server port (default: 9012)')
+    args = parser.parse_args()
+
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     trace_base = OUTPUT_DIR / 'jax_traces' / timestamp
     hlo_dir = OUTPUT_DIR / 'hlo_dumps' / timestamp
@@ -636,7 +770,8 @@ def main():
     print(f"Devices:      {jax.devices()}")
     print(f"JAX version:  {jax.__version__}")
     print(f"Volume sizes: {VOLUME_SIZES}")
-    print(f"Runs/size:    {RUNS_PER_SIZE} (run 1 warmup, run 2 traced, run 3 timing)")
+    print(f"Runs/size:    {RUNS_PER_SIZE}")
+    print(f"Mode:         {'server (live capture)' if args.server else 'file trace'}")
 
     results = {
         'timestamp': datetime.now().isoformat(),
@@ -652,46 +787,10 @@ def main():
         'cost_analysis': {},
     }
 
-    for vol_size in VOLUME_SIZES:
-        print(f"\n{'=' * 60}")
-        print(f"Volume size: {vol_size}\u00b3 (views: {vol_size // 2})")
-        print("=" * 60)
-
-        for run in range(RUNS_PER_SIZE):
-            # Capture XLA trace on Run 2 (after JIT warmup)
-            if run == TRACE_RUN:
-                trace_dir = trace_base / f'vol{vol_size}'
-                trace_dir.mkdir(parents=True, exist_ok=True)
-                print(f"\n  Run {run + 1}/{RUNS_PER_SIZE} [TRACED -> {trace_dir.relative_to(OUTPUT_DIR)}]")
-            else:
-                trace_dir = None
-                label = "warmup" if run == 0 else ""
-                suffix = f" [{label}]" if label else ""
-                print(f"\n  Run {run + 1}/{RUNS_PER_SIZE}{suffix}")
-
-            ctx = jax.profiler.trace(str(trace_dir)) if trace_dir else contextlib.nullcontext()
-            with ctx:
-                timings = run_profiling_pass(vol_size)
-
-            for operation, elapsed in timings.items():
-                results['measurements'].append({
-                    'operation': operation,
-                    'volume_size': vol_size,
-                    'run': run + 1,
-                    'time': elapsed,
-                    'traced': run == TRACE_RUN,
-                })
-                print(f"    {operation}: {elapsed:.4f}s")
-
-        # Cost analysis (FLOPs, bytes accessed, arithmetic intensity)
-        print(f"\n  Cost analysis (vol {vol_size}\u00b3):")
-        costs = collect_cost_analysis(vol_size)
-        results['cost_analysis'][str(vol_size)] = costs
-
-        # HLO computation graph dumps
-        print(f"\n  HLO dumps (vol {vol_size}\u00b3):")
-        n_dumped = dump_hlo(vol_size, hlo_dir)
-        print(f"    {n_dumped} HLO graphs saved to {hlo_dir.relative_to(OUTPUT_DIR)}/")
+    if args.server:
+        main_server_mode(VOLUME_SIZES, hlo_dir, results, args.port)
+    else:
+        main_file_trace(VOLUME_SIZES, trace_base, hlo_dir, results)
 
     # Save JSON results (timing + cost analysis)
     json_file = OUTPUT_DIR / f"mbirjax_profile_{timestamp}.json"
@@ -704,10 +803,12 @@ def main():
     print("=" * 60)
     print(f"\nOutput:")
     print(f"  Timing + cost analysis: {json_file.name}")
-    print(f"  XLA traces:            jax_traces/{timestamp}/")
+    if not args.server:
+        print(f"  XLA traces:            jax_traces/{timestamp}/")
     print(f"  HLO dumps:             hlo_dumps/{timestamp}/")
-    print(f"\nView traces in TensorBoard:")
-    print(f"  tensorboard --logdir=/output/jax_traces/{timestamp}")
+    if not args.server:
+        print(f"\nView traces in TensorBoard:")
+        print(f"  tensorboard --logdir=/output/jax_traces/{timestamp}")
     print(f"\nXProf tools to use:")
     print(f"  - Trace Viewer:     GPU compute vs memory transfer timeline")
     print(f"  - Roofline Analysis: identify memory-bound ops (FPGA candidates)")

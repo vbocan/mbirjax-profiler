@@ -1,7 +1,7 @@
 # MBIRJAX GPU Profiler — XLA-level profiling for FPGA candidate discovery
-# CUDA runtime base — JAX bundles its own CUDA libs
+# CUDA devel base — includes CUPTI libraries needed for GPU kernel profiling
 
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
 
 LABEL maintainer="MBIRJAX Profiler Setup"
 LABEL description="JAX-based tomographic reconstruction with XLA-level GPU profiling for FPGA optimization"

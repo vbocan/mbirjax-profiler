@@ -18,8 +18,16 @@ services:
       - XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
       - TF_CPP_MIN_LOG_LEVEL=2
       - OUTPUT_DIR=/output
+      # Expose all NVIDIA driver capabilities (compute, utility, AND profiling/CUPTI)
+      - NVIDIA_DRIVER_CAPABILITIES=all
       # XLA HLO graph dumps (text + interactive HTML graphs)
       - XLA_FLAGS=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true --xla_gpu_enable_command_buffer=
+
+    # Required for CUPTI GPU profiling access inside the container
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
 
     deploy:
       resources:
@@ -36,6 +44,7 @@ services:
 
     ports:
       - "6006:6006"  # TensorBoard
+      - "9012:9012"  # JAX profiler server (for XProf CAPTURE PROFILE)
 
     volumes:
       - ./output:/output
