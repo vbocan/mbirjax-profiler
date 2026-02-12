@@ -1,0 +1,5 @@
+output/
+.git/
+.github/
+__pycache__/
+*.md

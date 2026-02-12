@@ -4,8 +4,8 @@ XLA-level GPU profiling of all MBIRJAX operations for FPGA candidate identificat
 
 ## Prerequisites
 
-- **Docker Desktop** with Docker Compose V2 (`docker compose`, not `docker-compose`)
-- **NVIDIA GPU** with driver 565.90+ (RTX 5080 or compatible)
+- **Docker Desktop** (or Docker Engine on Linux)
+- **NVIDIA GPU** with driver 565.90+ (RTX 5080 or compatible) — for GPU mode
 - **NVIDIA Container Toolkit** (included with Docker Desktop on Windows/WSL2)
 
 Verify GPU access in Docker:
@@ -13,26 +13,43 @@ Verify GPU access in Docker:
 docker run --rm --gpus all nvidia/cuda:12.8.0-runtime-ubuntu22.04 nvidia-smi
 ```
 
-## Quick Start
+## Build
 
-**Windows:**
-```powershell
-.\start.ps1
+```bash
+# GPU image (requires NVIDIA GPU + drivers)
+docker build -t mbirjax-profiler:gpu .
+
+# CPU image (works on any machine)
+docker build \
+  --build-arg BASE_IMAGE=ubuntu:22.04 \
+  --build-arg JAX_PACKAGE=jax \
+  --build-arg JAX_PLATFORMS_DEFAULT=cpu \
+  --build-arg XLA_FLAGS_DEFAULT="--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true" \
+  -t mbirjax-profiler:cpu .
 ```
 
-**Linux/macOS:**
+## Usage
+
+Pre-built images are pushed to `docker.alkemista.tech` on every push to `master`:
+
 ```bash
-chmod +x start.sh
-./start.sh
+# Pull pre-built images (no build or source checkout needed)
+docker pull docker.alkemista.tech/mbirjax-profiler:gpu
+docker pull docker.alkemista.tech/mbirjax-profiler:cpu
 ```
 
-Or run directly:
 ```bash
-# Profile
-docker compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py
+# Run profiler (GPU)
+docker run --rm --gpus all --shm-size=16g --cap-add=SYS_ADMIN \
+  --security-opt=seccomp:unconfined --ulimit memlock=-1:-1 \
+  -v ./output:/output docker.alkemista.tech/mbirjax-profiler:gpu
+
+# Run profiler (CPU)
+docker run --rm -v ./output:/output docker.alkemista.tech/mbirjax-profiler:cpu
 
 # View traces in TensorBoard
-docker compose run --rm -p 6006:6006 mbirjax-profiler tensorboard --logdir=/output/jax_traces --host=0.0.0.0 --port=6006
+docker run --rm -p 6006:6006 -v ./output:/output docker.alkemista.tech/mbirjax-profiler:gpu \
+  tensorboard --logdir=/output/jax_traces --host=0.0.0.0
 ```
 
 Then open http://localhost:6006.
@@ -102,21 +119,21 @@ The profiler produces HLO graphs at two levels:
 
 2. **Comprehensive XLA HTML graphs** (`output/hlo_dumps_xla/`) — produced automatically via `XLA_FLAGS`. These are interactive HTML files showing the full computation graph with zoom/pan. Open any `.html` file in a browser to explore the graph visually.
 
-The comprehensive dumps include every XLA compilation pass (before and after optimization), so the output is large. To disable, comment out the `XLA_FLAGS` line in `docker-compose.yml`.
+The comprehensive dumps include every XLA compilation pass (before and after optimization), so the output is large. To disable, override the `XLA_FLAGS` environment variable at runtime (e.g. `docker run -e XLA_FLAGS="" ...`).
 
 ## Verification
 
 ```bash
 # GPU visible in container
-docker compose run --rm mbirjax-profiler nvidia-smi
+docker run --rm --gpus all mbirjax-profiler:gpu nvidia-smi
 
 # JAX sees CUDA
-docker compose run --rm mbirjax-profiler python -c "import jax; print(jax.devices())"
+docker run --rm --gpus all mbirjax-profiler:gpu python -c "import jax; print(jax.devices())"
 ```
 
 ## System Requirements
 
-- NVIDIA GPU (RTX 5080 or compatible)
+- NVIDIA GPU (RTX 5080 or compatible) — for GPU mode
 - CUDA 12.8+ / Driver 565.90+
-- Docker Desktop with Compose V2
+- Docker Desktop (or Docker Engine on Linux)
 - 16+ GB RAM (for 256^3 volumes on GPU)
