@@ -1,7 +1,8 @@
-# MBIRJAX GPU Profiler — XLA-level profiling for FPGA candidate discovery
-# CUDA devel base — includes CUPTI libraries needed for GPU kernel profiling
+# MBIRJAX Profiler — XLA-level profiling for FPGA candidate discovery
+# Supports GPU (CUDA devel + CUPTI) and CPU-only modes via build args
 
-FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:12.8.0-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
 
 LABEL maintainer="MBIRJAX Profiler Setup"
 LABEL description="JAX-based tomographic reconstruction with XLA-level GPU profiling for FPGA optimization"
@@ -30,8 +31,9 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
 RUN python -m ensurepip --upgrade \
     && python -m pip install --no-cache-dir --upgrade pip
 
-# Install JAX with CUDA support, MBIRJAX, and profiling tools
-RUN pip install --no-cache-dir "jax[cuda12]" mbirjax tensorboard xprof
+# Install JAX (CUDA or CPU-only), MBIRJAX, and profiling tools
+ARG JAX_PACKAGE="jax[cuda12]"
+RUN pip install --no-cache-dir ${JAX_PACKAGE} mbirjax tensorboard xprof
 
 # Create output directory
 RUN mkdir -p ${OUTPUT_DIR}

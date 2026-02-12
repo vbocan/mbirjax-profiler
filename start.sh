@@ -1,5 +1,5 @@
 #!/bin/bash
-# MBIRJAX GPU Profiler — XLA-level profiling for FPGA candidate discovery
+# MBIRJAX Profiler — XLA-level profiling for FPGA candidate discovery
 
 cd "$(dirname "$0")"
 
@@ -9,27 +9,49 @@ if ! docker info > /dev/null 2>&1; then
     exit 1
 fi
 
+# Default mode
+MODE="gpu"
+SERVICE="profiler-gpu"
+
 show_menu() {
     clear
     echo ""
     echo "============================================================"
-    echo "  MBIRJAX GPU Profiler (XLA / TensorBoard)"
+    echo "  MBIRJAX Profiler (XLA / TensorBoard)"
     echo "============================================================"
+    echo ""
+    if [ "$MODE" = "gpu" ]; then
+        echo "  Mode: GPU  (CUDA + CUPTI profiling)"
+    else
+        echo "  Mode: CPU  (XLA traces + cost analysis only)"
+    fi
     echo ""
     echo "  [R] Run profiler  (captures XLA traces + cost analysis + HLO)"
     echo "  [T] TensorBoard   (view XLA traces in browser)"
+    echo "  [M] Switch mode   (CPU <-> GPU)"
     echo "  [Q] Quit"
     echo ""
 }
 
+switch_mode() {
+    if [ "$MODE" = "gpu" ]; then
+        MODE="cpu"
+        SERVICE="profiler-cpu"
+    else
+        MODE="gpu"
+        SERVICE="profiler-gpu"
+    fi
+    echo ""
+    echo "Switched to ${MODE^^} mode"
+    sleep 0.5
+}
+
 run_profile() {
     echo ""
-    echo "Running GPU profiler..."
-    echo "Volume sizes: 32, 64, 128, 256"
-    echo "Runs per size: 3 (run 2 is traced)"
+    echo "Running profiler in ${MODE^^} mode..."
     echo ""
 
-    if ! docker compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py; then
+    if ! docker compose run --rm "$SERVICE" python /scripts/comprehensive_profiler.py; then
         echo ""
         echo "[FAIL] Profiling failed"
         read -p "Press Enter to continue"
@@ -157,7 +179,7 @@ start_tensorboard() {
         open "http://localhost:6006"
     fi
 
-    docker compose run --rm -p 6006:6006 mbirjax-profiler tensorboard --logdir="$logdir" --host=0.0.0.0 --port=6006
+    docker compose run --rm -p 6006:6006 "$SERVICE" tensorboard --logdir="$logdir" --host=0.0.0.0 --port=6006
 }
 
 # Main loop
@@ -168,6 +190,7 @@ while true; do
     case "${choice^^}" in
         R) run_profile ;;
         T) start_tensorboard ;;
+        M) switch_mode ;;
         Q) echo ""; exit 0 ;;
         *) echo "Invalid choice"; read -p "Press Enter to continue" ;;
     esac

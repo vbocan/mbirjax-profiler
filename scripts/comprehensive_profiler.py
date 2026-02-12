@@ -45,6 +45,11 @@ from mbirjax import ParallelBeamModel, ConeBeamModel
 from mbirjax import gen_pixel_partition
 import mbirjax
 
+try:
+    from mbirjax import TranslationModel
+except ImportError:
+    TranslationModel = None
+
 OUTPUT_DIR = Path('/output')
 
 # Fixed volume sizes for complexity analysis
@@ -297,6 +302,114 @@ def profile_cone_beam(phantom, vol_size, num_views):
     return timings
 
 
+def profile_translation_model(phantom, vol_size, num_views):
+    """Profile all TranslationModel operations."""
+    timings = {}
+
+    # Create a grid of translation vectors
+    n_side = max(2, int(np.sqrt(num_views)))
+    num_translations = n_side * n_side
+    spacing = vol_size // 4
+    translation_vectors = mbirjax.gen_translation_vectors(n_side, n_side, spacing, spacing)
+
+    model = TranslationModel(
+        sinogram_shape=(num_translations, vol_size, vol_size),
+        translation_vectors=translation_vectors,
+        source_detector_dist=4.0 * vol_size,
+        source_iso_dist=2.0 * vol_size,
+    )
+    model.set_params(recon_shape=(vol_size, vol_size, vol_size))
+    partitions = gen_pixel_partition((vol_size, vol_size, vol_size), 4)
+
+    # Forward projection
+    with step('translation_forward_project'):
+        t, sinogram = time_operation(model.forward_project, phantom)
+    timings['translation_forward_project'] = t
+
+    # Back projection
+    with step('translation_back_project'):
+        t, _ = time_operation(model.back_project, sinogram)
+    timings['translation_back_project'] = t
+
+    # Sparse forward projection
+    try:
+        pixel_indices = partitions[0]
+        voxel_values = phantom.reshape(vol_size * vol_size, vol_size)[pixel_indices]
+        with step('translation_sparse_forward_project'):
+            t, _ = time_operation(model.sparse_forward_project, voxel_values, pixel_indices)
+        timings['translation_sparse_forward_project'] = t
+    except Exception:
+        pass
+
+    # Sparse back projection
+    try:
+        pixel_indices = partitions[0]
+        with step('translation_sparse_back_project'):
+            t, _ = time_operation(model.sparse_back_project, sinogram, pixel_indices)
+        timings['translation_sparse_back_project'] = t
+    except Exception:
+        pass
+
+    # Hessian diagonal
+    with step('translation_hessian_diagonal'):
+        t, _ = time_operation(model.compute_hessian_diagonal)
+    timings['translation_hessian_diagonal'] = t
+
+    # Direct filter
+    try:
+        with step('translation_direct_filter'):
+            t, _ = time_operation(model.direct_filter, sinogram)
+        timings['translation_direct_filter'] = t
+    except Exception:
+        pass
+
+    # Add noise for reconstruction
+    key = jax.random.PRNGKey(42)
+    sinogram_noisy = sinogram + 0.01 * jnp.max(sinogram) * jax.random.normal(key, sinogram.shape)
+    sinogram_noisy.block_until_ready()
+
+    # MBIR reconstruction (1 iteration)
+    with step('translation_mbir_recon'):
+        t, _ = time_operation(model.recon, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+    timings['translation_mbir_recon'] = t
+
+    # Proximal map (1 iteration)
+    try:
+        with step('translation_prox_map'):
+            t, _ = time_operation(model.prox_map, phantom, sinogram_noisy, max_iterations=1, stop_threshold_change_pct=0, print_logs=False)
+        timings['translation_prox_map'] = t
+    except Exception:
+        pass
+
+    # FDK reconstruction
+    with step('translation_fdk_recon'):
+        t, _ = time_operation(model.fdk_recon, sinogram_noisy)
+    timings['translation_fdk_recon'] = t
+
+    # FDK filter
+    with step('translation_fdk_filter'):
+        t, _ = time_operation(model.fdk_filter, sinogram_noisy)
+    timings['translation_fdk_filter'] = t
+
+    # Direct reconstruction
+    try:
+        with step('translation_direct_recon'):
+            t, _ = time_operation(model.direct_recon, sinogram_noisy)
+        timings['translation_direct_recon'] = t
+    except Exception:
+        pass
+
+    # Weight generation (MAR)
+    try:
+        with step('translation_gen_weights_mar'):
+            t, _ = time_operation(mbirjax.gen_weights_mar, model, sinogram)
+        timings['translation_gen_weights_mar'] = t
+    except Exception:
+        pass
+
+    return timings
+
+
 def profile_denoiser(phantom, vol_size):
     """Profile QGGMRFDenoiser (exercises QGGMRF regularization kernels)."""
     timings = {}
@@ -370,6 +483,11 @@ def run_profiling_pass(vol_size):
     timings = {}
     timings.update(profile_parallel_beam(phantom, vol_size, num_views))
     timings.update(profile_cone_beam(phantom, vol_size, num_views))
+    if TranslationModel is not None:
+        try:
+            timings.update(profile_translation_model(phantom, vol_size, num_views))
+        except Exception:
+            pass
     timings.update(profile_denoiser(phantom, vol_size))
     timings.update(profile_utilities(phantom, vol_size))
 
@@ -540,6 +658,74 @@ def collect_cost_analysis(vol_size):
         'note': 'composite: cone_fdk_filter + cone_back_project',
     }
 
+    # --- Translation model ---
+    if TranslationModel is not None:
+        try:
+            n_side = max(2, int(np.sqrt(num_views)))
+            num_translations = n_side * n_side
+            spacing = vol_size // 4
+            translation_vectors = mbirjax.gen_translation_vectors(n_side, n_side, spacing, spacing)
+
+            trans_model = TranslationModel(
+                sinogram_shape=(num_translations, vol_size, vol_size),
+                translation_vectors=translation_vectors,
+                source_detector_dist=4.0 * vol_size,
+                source_iso_dist=2.0 * vol_size,
+            )
+            trans_model.set_params(recon_shape=recon_shape)
+            sinogram_trans = trans_model.forward_project(phantom)
+            sinogram_trans.block_until_ready()
+            trans_pf = trans_model.projector_functions
+
+            trans_kernel_ops = [
+                ('translation_forward_project', 'sparse_forward_project',
+                 trans_pf.sparse_forward_project, (voxel_values, pixel_indices)),
+                ('translation_back_project', 'sparse_back_project',
+                 trans_pf.sparse_back_project, (sinogram_trans, pixel_indices)),
+                ('translation_hessian_diagonal', 'sparse_back_project',
+                 trans_pf.sparse_back_project, (sinogram_trans, pixel_indices)),
+            ]
+
+            for name, kernel_name, jit_fn, args in trans_kernel_ops:
+                try:
+                    entry = extract_cost(jit_fn, *args)
+                    if entry:
+                        entry['kernel'] = kernel_name
+                        entry['num_partitions'] = num_partitions
+                        costs[name] = entry
+                        print(f"    {name}: {entry.get('flops', '?')} flops/partition, "
+                              f"{entry.get('bytes accessed', '?')} bytes")
+                    else:
+                        costs[name] = {'note': 'cost_analysis returned empty'}
+                except Exception as e:
+                    costs[name] = {'error': str(e)}
+                    print(f"    {name}: cost analysis failed ({e})")
+
+            # --- Translation filter kernel (representative 1-D convolution) ---
+            @jax.jit
+            def trans_filter_one_view(view):
+                return jax.vmap(lambda row: jnp.convolve(row, recon_filter_rep, mode='same'))(view)
+
+            try:
+                entry = extract_cost(trans_filter_one_view, single_view)
+                if entry:
+                    entry['kernel'] = 'filter_one_view (representative)'
+                    entry['num_translations'] = num_translations
+                    costs['translation_fdk_filter'] = entry
+                    print(f"    translation_fdk_filter: {entry.get('flops', '?')} flops/view, "
+                          f"{entry.get('bytes accessed', '?')} bytes")
+                else:
+                    costs['translation_fdk_filter'] = {'note': 'cost_analysis returned empty'}
+            except Exception as e:
+                costs['translation_fdk_filter'] = {'error': str(e)}
+                print(f"    translation_fdk_filter: cost analysis failed ({e})")
+
+            costs['translation_fdk_recon'] = {
+                'note': 'composite: translation_fdk_filter + translation_back_project',
+            }
+        except Exception:
+            pass
+
     return costs
 
 
@@ -625,6 +811,44 @@ def dump_hlo(vol_size, hlo_dir):
     except Exception:
         pass
 
+    # --- Translation model ---
+    if TranslationModel is not None:
+        try:
+            n_side = max(2, int(np.sqrt(num_views)))
+            num_translations = n_side * n_side
+            spacing = vol_size // 4
+            translation_vectors = mbirjax.gen_translation_vectors(n_side, n_side, spacing, spacing)
+
+            trans_model = TranslationModel(
+                sinogram_shape=(num_translations, vol_size, vol_size),
+                translation_vectors=translation_vectors,
+                source_detector_dist=4.0 * vol_size,
+                source_iso_dist=2.0 * vol_size,
+            )
+            trans_model.set_params(recon_shape=recon_shape)
+            sinogram_trans = trans_model.forward_project(phantom)
+            sinogram_trans.block_until_ready()
+            trans_pf = trans_model.projector_functions
+
+            trans_ops = [
+                ('sparse_forward_project_translation', trans_pf.sparse_forward_project,
+                 (voxel_values, pixel_indices)),
+                ('sparse_back_project_translation', trans_pf.sparse_back_project,
+                 (sinogram_trans, pixel_indices)),
+            ]
+
+            for name, jit_fn, args in trans_ops:
+                try:
+                    lowered = jit_fn.lower(*args)
+                    hlo_text = lowered.as_text()
+                    out_path = hlo_dir / f'{name}_vol{vol_size}.txt'
+                    out_path.write_text(hlo_text)
+                    dumped += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     return dumped
 
 
@@ -633,30 +857,43 @@ def main():
     trace_base = OUTPUT_DIR / 'jax_traces' / timestamp
     hlo_dir = OUTPUT_DIR / 'hlo_dumps' / timestamp
 
+    backend = jax.default_backend()
+
+    # Adapt volume sizes for CPU (256³ is very slow without GPU)
+    if backend == 'cpu':
+        volume_sizes = [s for s in VOLUME_SIZES if s <= 128]
+    else:
+        volume_sizes = list(VOLUME_SIZES)
+
     print("\n" + "=" * 60)
-    print("MBIRJAX GPU PROFILER — Phase 1 (XLA-level)")
+    print("MBIRJAX PROFILER — Phase 1 (XLA-level)")
     print("=" * 60)
-    print(f"Backend:      {jax.default_backend()}")
+    print(f"Backend:      {backend}")
     print(f"Devices:      {jax.devices()}")
     print(f"JAX version:  {jax.__version__}")
-    print(f"Volume sizes: {VOLUME_SIZES}")
+    print(f"Volume sizes: {volume_sizes}")
     print(f"Runs/size:    {RUNS_PER_SIZE} (run 1 warmup, run 2 traced, run 3 timing)")
+
+    if backend == 'cpu':
+        print(f"\nNOTE: CPU backend — volume sizes limited to {volume_sizes}.")
+        print("  GPU kernel profiling (CUPTI) is not available.")
+        print("  XLA traces, cost analysis, and HLO dumps are still captured.")
 
     results = {
         'timestamp': datetime.now().isoformat(),
         'environment': {
-            'backend': str(jax.default_backend()),
+            'backend': str(backend),
             'devices': [str(d) for d in jax.devices()],
             'jax_version': jax.__version__,
             'mbirjax_version': getattr(mbirjax, '__version__', 'unknown'),
         },
-        'volume_sizes': VOLUME_SIZES,
+        'volume_sizes': volume_sizes,
         'runs_per_size': RUNS_PER_SIZE,
         'measurements': [],
         'cost_analysis': {},
     }
 
-    for vol_size in VOLUME_SIZES:
+    for vol_size in volume_sizes:
         print(f"\n{'=' * 60}")
         print(f"Volume size: {vol_size}\u00b3 (views: {vol_size // 2})")
         print("=" * 60)
@@ -712,9 +949,10 @@ def main():
     print(f"  HLO dumps:             hlo_dumps/{timestamp}/")
     print(f"\nView traces in TensorBoard:")
     print(f"  tensorboard --logdir=/output/jax_traces/{timestamp}")
-    print(f"\nXProf tip: In HLO Op Profile, turn OFF 'Exclude Idle'.")
-    print(f"  (GDDR6 GPUs like the RTX A4000 don't report HBM utilization,")
-    print(f"   so XProf classifies ops as idle. Disabling the filter shows all ops.)")
+    if backend != 'cpu':
+        print(f"\nXProf tip: In HLO Op Profile, turn OFF 'Exclude Idle'.")
+        print(f"  (GDDR6 GPUs like the RTX A4000 don't report HBM utilization,")
+        print(f"   so XProf classifies ops as idle. Disabling the filter shows all ops.)")
 
 
 if __name__ == '__main__':

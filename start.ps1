@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    MBIRJAX GPU Profiler — XLA-level profiling for FPGA candidate discovery
+    MBIRJAX Profiler — XLA-level profiling for FPGA candidate discovery
 
 .EXAMPLE
     .\start.ps1
@@ -18,31 +18,53 @@ try {
     exit 1
 }
 
+# Default mode
+$script:Mode = "gpu"
+$script:Service = "profiler-gpu"
+
 function Show-Banner {
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "  MBIRJAX GPU Profiler (XLA / TensorBoard)" -ForegroundColor Cyan
+    Write-Host "  MBIRJAX Profiler (XLA / TensorBoard)" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
 }
 
 function Show-Menu {
+    if ($script:Mode -eq "gpu") {
+        Write-Host "  Mode: GPU  (CUDA + CUPTI profiling)" -ForegroundColor Green
+    } else {
+        Write-Host "  Mode: CPU  (XLA traces + cost analysis only)" -ForegroundColor Yellow
+    }
+    Write-Host ""
     Write-Host "  [R] Run profiler  (captures XLA traces + cost analysis + HLO)" -ForegroundColor White
     Write-Host "  [T] TensorBoard   (view XLA traces in browser)" -ForegroundColor White
+    Write-Host "  [M] Switch mode   (CPU <-> GPU)" -ForegroundColor White
     Write-Host "  [Q] Quit" -ForegroundColor White
     Write-Host ""
 }
 
+function Switch-Mode {
+    if ($script:Mode -eq "gpu") {
+        $script:Mode = "cpu"
+        $script:Service = "profiler-cpu"
+    } else {
+        $script:Mode = "gpu"
+        $script:Service = "profiler-gpu"
+    }
+    Write-Host ""
+    Write-Host "Switched to $($script:Mode.ToUpper()) mode" -ForegroundColor Cyan
+    Start-Sleep -Milliseconds 500
+}
+
 function Run-Profile {
     Write-Host ""
-    Write-Host "Running GPU profiler (file-based trace)..." -ForegroundColor Cyan
-    Write-Host "Volume sizes: 32, 64, 128, 256" -ForegroundColor Gray
-    Write-Host "Runs per size: 3 (run 2 is traced)" -ForegroundColor Gray
+    Write-Host "Running profiler in $($script:Mode.ToUpper()) mode..." -ForegroundColor Cyan
     Write-Host ""
 
     Set-Location $PSScriptRoot
 
-    docker compose run --rm mbirjax-profiler python /scripts/comprehensive_profiler.py
+    docker compose run --rm $script:Service python /scripts/comprehensive_profiler.py
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host ""
@@ -152,7 +174,7 @@ function Start-TensorBoard {
     Start-Process "http://localhost:6006"
 
     Set-Location $PSScriptRoot
-    docker compose run --rm -p 6006:6006 mbirjax-profiler tensorboard --logdir="$logdir" --host=0.0.0.0 --port=6006
+    docker compose run --rm -p 6006:6006 $script:Service tensorboard --logdir="$logdir" --host=0.0.0.0 --port=6006
 }
 
 # Main loop
@@ -168,6 +190,7 @@ while ($true) {
     switch ($choice.ToUpper()) {
         "R" { Run-Profile }
         "T" { Start-TensorBoard }
+        "M" { Switch-Mode }
         "Q" {
             Write-Host ""
             exit 0
