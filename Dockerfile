@@ -26,6 +26,9 @@ ENV TF_CPP_MIN_LOG_LEVEL=2
 
 # Install Python 3.11 via deadsnakes PPA (Ubuntu 22.04 ships 3.10)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    gpg \
+    gpg-agent \
     software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
