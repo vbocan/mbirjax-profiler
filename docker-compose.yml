@@ -1,0 +1,46 @@
+# MBIRJAX Profiler — Docker Compose configuration
+# Defines GPU, CPU, and TensorBoard services
+
+services:
+  gpu:
+    build:
+      context: .
+    image: mbirjax-profiler:gpu
+    shm_size: 16g
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./output:/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  cpu:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ubuntu:22.04
+        JAX_PACKAGE: jax
+        JAX_PLATFORMS_DEFAULT: cpu
+        XLA_FLAGS_DEFAULT: "--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true"
+    image: mbirjax-profiler:cpu
+    volumes:
+      - ./output:/output
+
+  tensorboard:
+    image: mbirjax-profiler:gpu
+    ports:
+      - "6006:6006"
+    volumes:
+      - ./output:/output
+    command: tensorboard --logdir=/output/jax_traces --host=0.0.0.0

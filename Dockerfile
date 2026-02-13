@@ -1,16 +1,15 @@
 # MBIRJAX Profiler — XLA-level profiling for FPGA candidate discovery
 # Supports GPU (CUDA devel + CUPTI) and CPU-only modes via build args
 #
-# Usage (standalone, no scripts needed):
+# Usage (via docker compose):
+#   Build:       docker compose build
+#   GPU:         docker compose run --rm gpu
+#   CPU:         docker compose run --rm cpu
+#   TensorBoard: docker compose up tensorboard
+#
+# Usage (standalone, no compose needed):
 #   GPU:  docker run --rm --gpus all -v ./output:/output mbirjax-profiler:gpu
 #   CPU:  docker run --rm -v ./output:/output mbirjax-profiler:cpu
-#
-# TensorBoard (override CMD):
-#   docker run --rm -p 6006:6006 -v ./output:/output mbirjax-profiler:gpu \
-#     tensorboard --logdir=/output/jax_traces --host=0.0.0.0
-#
-# Shell access:
-#   docker run --rm -it -v ./output:/output mbirjax-profiler:gpu /bin/bash
 
 ARG BASE_IMAGE=nvidia/cuda:12.8.0-devel-ubuntu22.04
 FROM ${BASE_IMAGE}

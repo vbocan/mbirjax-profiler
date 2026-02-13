@@ -21,23 +21,10 @@ function Test-DockerImage {
     return [bool]$result
 }
 
-function Build-Image {
-    param([string]$Mode)
-
+function Build-Images {
     Write-Host ""
-    if ($Mode -eq "gpu") {
-        Write-Host "  Building GPU image..." -ForegroundColor Yellow
-        docker build -t $IMAGE_GPU .
-    } else {
-        Write-Host "  Building CPU image..." -ForegroundColor Yellow
-        docker build `
-            --build-arg BASE_IMAGE=ubuntu:22.04 `
-            --build-arg JAX_PACKAGE=jax `
-            --build-arg JAX_PLATFORMS_DEFAULT=cpu `
-            --build-arg XLA_FLAGS_DEFAULT="--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true" `
-            -t $IMAGE_CPU .
-    }
-
+    Write-Host "  Building GPU and CPU images..." -ForegroundColor Yellow
+    docker compose -f "$PSScriptRoot\docker-compose.yml" build
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  Build failed." -ForegroundColor Red
         return $false
@@ -60,7 +47,8 @@ function Ensure-Image {
     if ($reply -match "^[nN]") {
         return $false
     }
-    return (Build-Image $Mode)
+    docker compose -f "$PSScriptRoot\docker-compose.yml" build $Mode
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Run-Profiler {
@@ -76,18 +64,7 @@ function Run-Profiler {
     Write-Host "  Running profiler ($Mode mode)..." -ForegroundColor Cyan
     Write-Host ""
 
-    if ($Mode -eq "gpu") {
-        docker run --rm --gpus all --shm-size=16g `
-            --cap-add=SYS_ADMIN `
-            --security-opt=seccomp:unconfined `
-            --ulimit memlock=-1:-1 `
-            -v "${OUTPUT_DIR}:/output" `
-            $IMAGE_GPU
-    } else {
-        docker run --rm `
-            -v "${OUTPUT_DIR}:/output" `
-            $IMAGE_CPU
-    }
+    docker compose -f "$PSScriptRoot\docker-compose.yml" run --rm $Mode
 
     Write-Host ""
     if ($LASTEXITCODE -eq 0) {
@@ -98,15 +75,7 @@ function Run-Profiler {
 }
 
 function Start-TensorBoard {
-    # Use whichever image is available (prefer GPU)
-    $image = $null
-    if (Test-DockerImage $IMAGE_GPU) {
-        $image = $IMAGE_GPU
-    } elseif (Test-DockerImage $IMAGE_CPU) {
-        $image = $IMAGE_CPU
-    }
-
-    if (-not $image) {
+    if (-not (Test-DockerImage $IMAGE_GPU) -and -not (Test-DockerImage $IMAGE_CPU)) {
         Write-Host "  No profiler image found. Build one first (option B)." -ForegroundColor Red
         return
     }
@@ -123,10 +92,7 @@ function Start-TensorBoard {
     Write-Host "  Press Ctrl+C to stop." -ForegroundColor DarkGray
     Write-Host ""
 
-    docker run --rm -p 6006:6006 `
-        -v "${OUTPUT_DIR}:/output" `
-        $image `
-        tensorboard --logdir=/output/jax_traces --host=0.0.0.0
+    docker compose -f "$PSScriptRoot\docker-compose.yml" up tensorboard
 }
 
 # --- Main loop ---
@@ -139,8 +105,8 @@ while ($true) {
     Write-Host "  Images:  GPU [$gpuStatus]  CPU [$cpuStatus]" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  [B] Build images" -ForegroundColor Yellow
-    Write-Host "  [G] Profile  (GPU)" -ForegroundColor Green
-    Write-Host "  [C] Profile  (CPU)" -ForegroundColor Green
+    Write-Host "  [G] Profile using GPU" -ForegroundColor Green
+    Write-Host "  [C] Profile using CPU" -ForegroundColor Green
     Write-Host "  [V] View results  (TensorBoard)" -ForegroundColor Magenta
     Write-Host "  [Q] Quit" -ForegroundColor DarkGray
     Write-Host ""
@@ -151,17 +117,7 @@ while ($true) {
         "G" { Run-Profiler "gpu" }
         "C" { Run-Profiler "cpu" }
         "V" { Start-TensorBoard }
-        "B" {
-            Write-Host ""
-            Write-Host "  [1] GPU  [2] CPU  [3] Both" -ForegroundColor Yellow
-            $sub = Read-Host "  Which"
-            switch ($sub) {
-                "1" { Build-Image "gpu" }
-                "2" { Build-Image "cpu" }
-                "3" { Build-Image "gpu"; Build-Image "cpu" }
-                default { Write-Host "  Invalid choice." -ForegroundColor Red }
-            }
-        }
+        "B" { Build-Images }
         "Q" { Write-Host ""; break }
         default { Write-Host "  Invalid choice." -ForegroundColor Red }
     }

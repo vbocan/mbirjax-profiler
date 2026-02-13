@@ -29,22 +29,10 @@ image_exists() {
     [[ -n "$(docker images -q "$1" 2>/dev/null)" ]]
 }
 
-build_image() {
-    local mode="$1"
+build_images() {
     echo ""
-    if [[ "$mode" == "gpu" ]]; then
-        echo -e "  ${YELLOW}Building GPU image...${RESET}"
-        docker build -t "$IMAGE_GPU" "$SCRIPT_DIR"
-    else
-        echo -e "  ${YELLOW}Building CPU image...${RESET}"
-        docker build \
-            --build-arg BASE_IMAGE=ubuntu:22.04 \
-            --build-arg JAX_PACKAGE=jax \
-            --build-arg JAX_PLATFORMS_DEFAULT=cpu \
-            --build-arg XLA_FLAGS_DEFAULT="--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true" \
-            -t "$IMAGE_CPU" "$SCRIPT_DIR"
-    fi
-
+    echo -e "  ${YELLOW}Building GPU and CPU images...${RESET}"
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" build
     if [[ $? -ne 0 ]]; then
         echo -e "  ${RED}Build failed.${RESET}"
         return 1
@@ -66,7 +54,7 @@ ensure_image() {
     if [[ "$reply" =~ ^[nN] ]]; then
         return 1
     fi
-    build_image "$mode"
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" build "$mode"
 }
 
 run_profiler() {
@@ -80,18 +68,7 @@ run_profiler() {
     echo -e "  ${CYAN}Running profiler ($mode mode)...${RESET}"
     echo ""
 
-    if [[ "$mode" == "gpu" ]]; then
-        docker run --rm --gpus all --shm-size=16g \
-            --cap-add=SYS_ADMIN \
-            --security-opt=seccomp:unconfined \
-            --ulimit memlock=-1:-1 \
-            -v "$OUTPUT_DIR:/output" \
-            "$IMAGE_GPU"
-    else
-        docker run --rm \
-            -v "$OUTPUT_DIR:/output" \
-            "$IMAGE_CPU"
-    fi
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" run --rm "$mode"
 
     echo ""
     if [[ $? -eq 0 ]]; then
@@ -102,15 +79,7 @@ run_profiler() {
 }
 
 start_tensorboard() {
-    # Use whichever image is available (prefer GPU)
-    local image=""
-    if image_exists "$IMAGE_GPU"; then
-        image="$IMAGE_GPU"
-    elif image_exists "$IMAGE_CPU"; then
-        image="$IMAGE_CPU"
-    fi
-
-    if [[ -z "$image" ]]; then
+    if ! image_exists "$IMAGE_GPU" && ! image_exists "$IMAGE_CPU"; then
         echo -e "  ${RED}No profiler image found. Build one first (option B).${RESET}"
         return
     fi
@@ -126,10 +95,7 @@ start_tensorboard() {
     echo -e "  ${DIM}Press Ctrl+C to stop.${RESET}"
     echo ""
 
-    docker run --rm -p 6006:6006 \
-        -v "$OUTPUT_DIR:/output" \
-        "$image" \
-        tensorboard --logdir=/output/jax_traces --host=0.0.0.0
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" up tensorboard
 }
 
 # --- Main loop ---
@@ -142,8 +108,8 @@ while true; do
     echo -e "  ${DIM}Images:  GPU [$gpu_status]  CPU [$cpu_status]${RESET}"
     echo ""
     echo -e "  ${YELLOW}[B] Build images${RESET}"
-    echo -e "  ${GREEN}[G] Profile  (GPU)${RESET}"
-    echo -e "  ${GREEN}[C] Profile  (CPU)${RESET}"
+    echo -e "  ${GREEN}[G] Profile using GPU${RESET}"
+    echo -e "  ${GREEN}[C] Profile using CPU${RESET}"
     echo -e "  ${MAGENTA}[V] View results  (TensorBoard)${RESET}"
     echo -e "  ${DIM}[Q] Quit${RESET}"
     echo ""
@@ -154,17 +120,7 @@ while true; do
         G) run_profiler "gpu" ;;
         C) run_profiler "cpu" ;;
         V) start_tensorboard ;;
-        B)
-            echo ""
-            echo -e "  ${YELLOW}[1] GPU  [2] CPU  [3] Both${RESET}"
-            read -rp "  Which: " sub
-            case "$sub" in
-                1) build_image "gpu" ;;
-                2) build_image "cpu" ;;
-                3) build_image "gpu"; build_image "cpu" ;;
-                *) echo -e "  ${RED}Invalid choice.${RESET}" ;;
-            esac
-            ;;
+        B) build_images ;;
         Q) echo ""; break ;;
         *) echo -e "  ${RED}Invalid choice.${RESET}" ;;
     esac
