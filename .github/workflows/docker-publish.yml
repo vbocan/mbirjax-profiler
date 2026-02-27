@@ -7,6 +7,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
     strategy:
       matrix:
         include:
@@ -17,20 +19,20 @@ jobs:
               BASE_IMAGE=ubuntu:22.04
               JAX_PACKAGE=jax
               JAX_PLATFORMS_DEFAULT=cpu
-              XLA_FLAGS_DEFAULT=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true
+              XLA_FLAGS_DEFAULT=--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true --xla_cpu_enable_xprof_traceme --xla_gpu_deterministic_ops
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/login-action@v3
         with:
-          registry: docker.alkemista.tech
-          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
-          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: docker.alkemista.tech/mbirjax-profiler:${{ matrix.variant }}
+          tags: ghcr.io/${{ github.repository_owner }}/mbirjax-profiler:${{ matrix.variant }}
           build-args: ${{ matrix.build-args }}
