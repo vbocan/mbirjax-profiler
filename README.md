@@ -1,139 +1,152 @@
-# MBIRJAX GPU Profiler
+# MBIRJAX Profiler
 
-XLA-level GPU profiling of all MBIRJAX operations for FPGA candidate identification. Uses `jax.profiler.trace` to capture GPU execution timelines viewable in TensorBoard/XProf, plus XLA cost analysis and HLO computation graph dumps.
+Python profiling of MBIRJAX demo workflows in Docker. Captures cProfile function timing and XLA computation graphs (HLO dumps) for FPGA optimization analysis.
 
 ## Prerequisites
 
-- **Docker Desktop** (or Docker Engine on Linux)
-- **NVIDIA GPU** with driver 565.90+ (RTX 5080 or compatible) — for GPU mode
-- **NVIDIA Container Toolkit** (included with Docker Desktop on Windows/WSL2)
+- **Docker** (Docker Desktop on Windows/macOS, or Docker Engine on Linux)
+- **NVIDIA GPU** with drivers 565.90+ and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
 
-Verify GPU access in Docker:
-```bash
-docker run --rm --gpus all nvidia/cuda:12.8.0-runtime-ubuntu22.04 nvidia-smi
-```
-
-## Build
+## Quick Start
 
 ```bash
-# GPU image (requires NVIDIA GPU + drivers)
-docker build -t mbirjax-profiler:gpu .
+# Linux / macOS
+./profile.sh demo_1_shepp_logan.py
 
-# CPU image (works on any machine)
-docker build \
-  --build-arg BASE_IMAGE=ubuntu:22.04 \
-  --build-arg JAX_PACKAGE=jax \
-  --build-arg JAX_PLATFORMS_DEFAULT=cpu \
-  --build-arg XLA_FLAGS_DEFAULT="--xla_dump_to=/output/hlo_dumps_xla --xla_dump_hlo_as_text --xla_dump_hlo_as_html=true" \
-  -t mbirjax-profiler:cpu .
+# Windows (PowerShell)
+.\profile.ps1 demo_1_shepp_logan.py
 ```
+
+This builds the image (if needed), profiles the specified demo, and saves results to `./output/profiles/`.
 
 ## Usage
 
-Pre-built images are pushed to `docker.alkemista.tech` on every push to `master`:
+### PowerShell (Windows)
 
-```bash
-# Pull pre-built images (no build or source checkout needed)
-docker pull docker.alkemista.tech/mbirjax-profiler:gpu
-docker pull docker.alkemista.tech/mbirjax-profiler:cpu
+```powershell
+.\profile.ps1 demo_1_shepp_logan.py              # VCD Reconstruction (parallel beam)
+.\profile.ps1 demo_2_large_object.py             # Large object (partial projection)
+.\profile.ps1 demo_3_cropped_center_recon.py     # Cropped center reconstruction
+.\profile.ps1 demo_4_wrong_rotation_direction.py # Wrong rotation direction (cone beam)
+.\profile.ps1 demo_5_fbp_fdk.py                  # FBP Reconstruction
+.\profile.ps1 demo_6_qggmrf_denoiser.py          # QGGMRF Denoising
 ```
 
+### Bash (Linux / macOS)
+
 ```bash
-# Run profiler (GPU)
-docker run --rm --gpus all --shm-size=16g --cap-add=SYS_ADMIN \
-  --security-opt=seccomp:unconfined --ulimit memlock=-1:-1 \
-  -v ./output:/output docker.alkemista.tech/mbirjax-profiler:gpu
-
-# Run profiler (CPU)
-docker run --rm -v ./output:/output docker.alkemista.tech/mbirjax-profiler:cpu
-
-# View traces in TensorBoard
-docker run --rm -p 6006:6006 -v ./output:/output docker.alkemista.tech/mbirjax-profiler:gpu \
-  tensorboard --logdir=/output/jax_traces --host=0.0.0.0
+./profile.sh demo_1_shepp_logan.py              # VCD Reconstruction (parallel beam)
+./profile.sh demo_2_large_object.py             # Large object (partial projection)
+./profile.sh demo_3_cropped_center_recon.py     # Cropped center reconstruction
+./profile.sh demo_4_wrong_rotation_direction.py # Wrong rotation direction (cone beam)
+./profile.sh demo_5_fbp_fdk.py                  # FBP Reconstruction
+./profile.sh demo_6_qggmrf_denoiser.py          # QGGMRF Denoising
 ```
 
-Then open http://localhost:6006.
+### Build images manually
+
+```bash
+docker compose build cpu        # CPU-only image
+docker compose build gpu        # GPU image (requires NVIDIA GPU)
+```
+
+### Manual docker commands (CI / advanced)
+
+```bash
+docker compose run --rm cpu python /scripts/profiling_wrapper.py /demos/demo_1_shepp_logan.py
+docker compose run --rm gpu python /scripts/profiling_wrapper.py /demos/demo_6_qggmrf_denoiser.py
+```
 
 ## What It Does
 
-Profiles every MBIRJAX operation across multiple volume sizes (32^3, 64^3, 128^3, 256^3) with 3 runs per size:
+Runs each demo script with cProfile to capture Python function-level timing. Also generates XLA computation graphs (HLO dumps) showing the operations that could be mapped to FPGA.
 
-- **Run 1**: JIT warmup (XLA compilation happens here)
-- **Run 2**: Traced via `jax.profiler.trace` (captures XLA execution timeline)
-- **Run 3**: Timing only (for comparison)
+The original demo scripts from the MBIRJAX repository are executed unmodified via `runpy.run_path()`. Only GUI functions (`slice_viewer`, `easygui`) are mocked out for headless operation.
 
-After timing runs, collects XLA cost analysis (FLOPs, bytes accessed) and dumps HLO computation graphs for key operations.
+## Demos Profiled
 
-**Operations profiled (28):**
-- ParallelBeamModel: forward_project, back_project, sparse variants, hessian_diagonal, direct_filter, mbir_recon, prox_map, fbp_recon, fbp_filter, direct_recon, weight generation
-- ConeBeamModel: forward_project, back_project, sparse variants, hessian_diagonal, direct_filter, mbir_recon, prox_map, fdk_recon, fdk_filter, direct_recon, weight generation
-- QGGMRFDenoiser: denoise
-- Utilities: median_filter3d, gen_pixel_partition variants
+| Demo | Script | Core Operation | Default Parameters |
+|------|--------|----------------|-------------------|
+| 1 | `demo_1_shepp_logan.py` | VCD Reconstruction (`ct_model.recon`) | parallel beam, 64 views, 40 rows, 128 channels |
+| 2 | `demo_2_large_object.py` | VCD Reconstruction (`ct_model.recon`) | parallel beam, 120 views, 80 rows, 100 channels |
+| 3 | `demo_3_cropped_center_recon.py` | Cropped Center Recon (`ct_model.recon`) | parallel beam, 400 views, 20 rows, 400 channels |
+| 4 | `demo_4_wrong_rotation_direction.py` | VCD Reconstruction (`ct_model.recon`) | cone beam, 64 views, 40 rows, 128 channels |
+| 5 | `demo_5_fbp_fdk.py` | FBP Reconstruction (`ct_model.direct_recon`) | parallel beam, 128 views, 128 rows, 128 channels |
+| 6 | `demo_6_qggmrf_denoiser.py` | QGGMRF Denoising (`denoiser.denoise`) | 100x100x100, sigma=[0.05, 0.1, 0.15], seed=42 |
 
 ## Output
 
-Each profiling run produces:
-
-| Output | Location | Purpose |
-|--------|----------|---------|
-| Timing + cost analysis JSON | `output/mbirjax_profile_*.json` | Wall-clock timing, XLA FLOPs/bytes estimates |
-| XLA traces | `output/jax_traces/<timestamp>/vol<N>/` | TensorBoard/XProf GPU execution timeline |
-| HLO dumps | `output/hlo_dumps/<timestamp>/` | XLA computation graphs per operation |
-
-### XProf tools to use
-
-| Tool | What It Shows | FPGA Relevance |
-|------|---------------|----------------|
-| Trace Viewer | GPU compute vs memory transfer timeline | Identifies memory transfer bottlenecks |
-| Roofline Analysis | Arithmetic intensity per operation | Classifies compute-bound vs memory-bound ops |
-| HLO Op Stats | Per-operation time, GFLOPS/s, bandwidth | Ranks operations by cost |
-| GPU Kernel Stats | Per-kernel metrics mapped to JAX ops | Ground truth kernel timing |
-| Memory Viewer | Buffer lifetimes and peak allocation | FPGA on-chip memory sizing |
-
-### JSON structure
-
-```json
-{
-  "environment": {
-    "backend": "gpu",
-    "devices": ["cuda:0"],
-    "jax_version": "...",
-    "mbirjax_version": "..."
-  },
-  "measurements": [
-    {"operation": "parallel_forward_project", "volume_size": 64, "run": 1, "time": 0.234, "traced": false}
-  ],
-  "cost_analysis": {
-    "64": {
-      "parallel_forward_project": {"flops": 123456, "bytes accessed": 78900}
-    }
-  }
-}
+```
+output/
+  profiles/
+    demo_1_shepp_logan_python.txt   # cProfile text summary (top 30 functions)
+    demo_1_shepp_logan_python.prof  # cProfile binary (for snakeviz)
+  hlo_dumps_xla/                    # XLA computation graphs for FPGA analysis
+    *.html                          # Interactive graph visualizations
+    jit_*/                          # Per-function compilation data
 ```
 
-## XLA HLO Graph Visualization
+## Viewing Results
 
-The profiler produces HLO graphs at two levels:
+### Python profile - Text (`*_python.txt`)
 
-1. **Per-operation HLO text** (`output/hlo_dumps/<timestamp>/`) — programmatic dumps from the profiler script, one file per operation per volume size. Grep-able and diff-able.
-
-2. **Comprehensive XLA HTML graphs** (`output/hlo_dumps_xla/`) — produced automatically via `XLA_FLAGS`. These are interactive HTML files showing the full computation graph with zoom/pan. Open any `.html` file in a browser to explore the graph visually.
-
-The comprehensive dumps include every XLA compilation pass (before and after optimization), so the output is large. To disable, override the `XLA_FLAGS` environment variable at runtime (e.g. `docker run -e XLA_FLAGS="" ...`).
-
-## Verification
-
-```bash
-# GPU visible in container
-docker run --rm --gpus all mbirjax-profiler:gpu nvidia-smi
-
-# JAX sees CUDA
-docker run --rm --gpus all mbirjax-profiler:gpu python -c "import jax; print(jax.devices())"
+```powershell
+Get-Content .\output\profiles\demo_1_shepp_logan_python.txt
 ```
 
-## System Requirements
+Shows cumulative time per function. Look for hotspots in `mbirjax` and `jax` calls.
 
-- NVIDIA GPU (RTX 5080 or compatible) — for GPU mode
-- CUDA 12.8+ / Driver 565.90+
-- Docker Desktop (or Docker Engine on Linux)
-- 16+ GB RAM (for 256^3 volumes on GPU)
+### Python profile - Interactive (`*_python.prof`)
+
+```powershell
+pip install snakeviz
+snakeviz .\output\profiles\demo_1_shepp_logan_python.prof
+```
+
+Opens an interactive flame graph in your browser.
+
+### HLO graphs (`hlo_dumps_xla/`)
+
+```powershell
+# Open interactive HTML visualization
+explorer .\output\hlo_dumps_xla\
+# Then double-click any .html file
+```
+
+The HTML files show XLA computation graphs with clickable nodes showing operations (matrix multiplies, reductions, etc.) that could be mapped to FPGA.
+
+## XLA Flags
+
+Set in the Dockerfile as environment variables, applied to all profiling runs.
+
+| Flag | Purpose |
+|------|---------|
+| `--xla_dump_to` | Dump HLO computation graphs |
+| `--xla_dump_hlo_as_text` | Human-readable HLO text format |
+| `--xla_dump_hlo_as_html` | Interactive HTML graph visualization |
+| `--xla_hlo_profile` | Per-op profiling in HLO graph (GPU only) |
+| `--xla_gpu_deterministic_ops` | Deterministic GPU operations |
+
+## Project Structure
+
+```
+mbirjax-profiler/
+  profile.sh              # Linux/macOS launcher
+  profile.ps1             # Windows launcher
+  Dockerfile              # GPU (CUDA 12.8) and CPU (Ubuntu 22.04) modes
+  docker-compose.yml      # gpu, cpu services
+  demos/
+    demo_1_shepp_logan.py             # Parallel beam VCD reconstruction
+    demo_2_large_object.py            # Large object partial projection
+    demo_3_cropped_center_recon.py    # Cropped center reconstruction
+    demo_4_wrong_rotation_direction.py # Wrong rotation direction
+    demo_5_fbp_fdk.py                 # FBP/FDK reconstruction
+    demo_6_qggmrf_denoiser.py         # QGGMRF denoising
+  scripts/
+    profiling_wrapper.py         # Profiling wrapper (cProfile)
+  output/                        # Generated at runtime (not in git)
+```
+
+## Known Limitations
+
+- **GUI is mocked** — `easygui` and `mbirjax.slice_viewer` are patched out for headless Docker operation. The demos run to completion without displaying visualizations.
